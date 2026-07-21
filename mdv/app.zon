@@ -1,12 +1,28 @@
 .{
-    .id ="dev.native_sdk.mdv",
-    .name ="mdv",
-    .display_name ="Mdv",
+    .id = "au.com.bellizzi.mdv",
+    .name = "mdv",
+    .display_name = "mdv",
+    .description = "Minimalist markdown viewer.",
     .version = "0.1.0",
     .icons = .{ "assets/icon.png" },
     .platforms = .{ "macos", "linux" },
     .permissions = .{},
-    .capabilities = .{ "webview" },
+    .capabilities = .{ "webview", "file_associations" },
+    .bridge = .{
+        .commands = .{
+            .{ .name = "mdv.pending" },
+            .{ .name = "mdv.stat" },
+            .{ .name = "mdv.read" },
+        },
+    },
+    .file_associations = .{
+        .{
+            .name = "Markdown Document",
+            .role = "viewer",
+            .extensions = .{ "md", "markdown", "mdown", "mkd" },
+            .mime_types = .{ "text/markdown" },
+        },
+    },
     .frontend = .{
         .dist ="frontend/dist",
         .entry = "index.html",
@@ -27,6 +43,6 @@
     .web_engine = "system",
     .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
     .windows = .{
-        .{ .label = "main", .title ="Mdv", .width = 720, .height = 480, .restore_state = true },
+        .{ .label = "main", .title = "mdv", .width = 860, .height = 900, .restore_state = true },
     },
 }

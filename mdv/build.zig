@@ -102,6 +102,13 @@ pub fn build(b: *std.Build) void {
         .root_module = app_mod,
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
+    if (selected_platform == .macos) {
+        // Open-files shim: injects the application:openFiles: delegate method
+        // the SDK's AppKit host lacks (see src/open_files.m).
+        const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+        const shim_flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0" };
+        app_mod.addCSourceFile(.{ .file = b.path("src/open_files.m"), .flags = shim_flags });
+    }
     b.installArtifact(exe);
 
     const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
