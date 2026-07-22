@@ -436,7 +436,8 @@ body {
   margin-bottom: 3px;
 }
 
-.settings-row input {
+.settings-row input,
+.settings-row select {
   width: 100%;
   font: inherit;
   font-size: 13px;
@@ -448,7 +449,8 @@ body {
   outline: none;
 }
 
-.settings-row input:focus {
+.settings-row input:focus,
+.settings-row select:focus {
   border-color: var(--link);
 }
 

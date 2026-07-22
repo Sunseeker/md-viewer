@@ -278,6 +278,69 @@ const cfgEls = {
   reset: document.getElementById("cfg-reset"),
 };
 
+// Curated font choices; `probe` filters to fonts actually installed
+// (document.fonts.check). Values are full CSS stacks so the config file
+// stays portable and hand-editable.
+const BODY_FONTS = [
+  { label: "System (SF Pro)", value: "" },
+  { label: "New York (serif)", value: "ui-serif, 'New York', Georgia, serif" },
+  { label: "Charter", value: "Charter, Georgia, serif", probe: "Charter" },
+  { label: "Georgia", value: "Georgia, serif", probe: "Georgia" },
+  { label: "Iowan Old Style", value: "'Iowan Old Style', Georgia, serif", probe: "Iowan Old Style" },
+  { label: "Palatino", value: "Palatino, 'Palatino Linotype', Georgia, serif", probe: "Palatino" },
+  { label: "Athelas", value: "Athelas, Georgia, serif", probe: "Athelas" },
+  { label: "Baskerville", value: "Baskerville, Georgia, serif", probe: "Baskerville" },
+  { label: "Hoefler Text", value: "'Hoefler Text', Georgia, serif", probe: "Hoefler Text" },
+  { label: "Helvetica Neue", value: "'Helvetica Neue', Helvetica, Arial, sans-serif", probe: "Helvetica Neue" },
+  { label: "Avenir Next", value: "'Avenir Next', 'Helvetica Neue', sans-serif", probe: "Avenir Next" },
+  { label: "Optima", value: "Optima, 'Helvetica Neue', sans-serif", probe: "Optima" },
+  { label: "Seravek", value: "Seravek, 'Helvetica Neue', sans-serif", probe: "Seravek" },
+];
+
+const MONO_FONTS = [
+  { label: "System (SF Mono)", value: "" },
+  { label: "Menlo", value: "Menlo, monospace", probe: "Menlo" },
+  { label: "Monaco", value: "Monaco, monospace", probe: "Monaco" },
+  { label: "JetBrains Mono", value: "'JetBrains Mono', Menlo, monospace", probe: "JetBrains Mono" },
+  { label: "Fira Code", value: "'Fira Code', Menlo, monospace", probe: "Fira Code" },
+  { label: "Source Code Pro", value: "'Source Code Pro', Menlo, monospace", probe: "Source Code Pro" },
+  { label: "IBM Plex Mono", value: "'IBM Plex Mono', Menlo, monospace", probe: "IBM Plex Mono" },
+  { label: "Hack", value: "Hack, Menlo, monospace", probe: "Hack" },
+  { label: "Cascadia Code", value: "'Cascadia Code', Menlo, monospace", probe: "Cascadia Code" },
+  { label: "Courier New", value: "'Courier New', monospace", probe: "Courier New" },
+];
+
+function fontInstalled(name) {
+  try {
+    return document.fonts.check(`16px "${name}"`);
+  } catch (err) {
+    return true;
+  }
+}
+
+function populateFontSelect(select, fonts) {
+  select.innerHTML = "";
+  for (const font of fonts) {
+    if (font.probe && !fontInstalled(font.probe)) continue;
+    const opt = document.createElement("option");
+    opt.value = font.value;
+    opt.textContent = font.label;
+    select.appendChild(opt);
+  }
+}
+
+// Keeps a hand-edited config stack selectable instead of clobbering it.
+function ensureFontOption(select, value) {
+  if ([...select.options].some((o) => o.value === value)) return;
+  const opt = document.createElement("option");
+  opt.value = value;
+  opt.textContent = "Custom (config file)";
+  select.appendChild(opt);
+}
+
+populateFontSelect(cfgEls.fontFamily, BODY_FONTS);
+populateFontSelect(cfgEls.monoFamily, MONO_FONTS);
+
 let cfgWriteTimer = null;
 
 function persistConfig() {
@@ -294,6 +357,8 @@ function persistConfig() {
 }
 
 function populateSettings() {
+  ensureFontOption(cfgEls.fontFamily, cfgState.fontFamily);
+  ensureFontOption(cfgEls.monoFamily, cfgState.monoFamily);
   cfgEls.fontFamily.value = cfgState.fontFamily;
   cfgEls.monoFamily.value = cfgState.monoFamily;
   cfgEls.fontSize.value = cfgState.fontSize;
@@ -316,6 +381,7 @@ function readSettingsInputs() {
 
 for (const key of ["fontFamily", "monoFamily", "fontSize", "lineHeight", "contentWidth"]) {
   cfgEls[key].addEventListener("input", readSettingsInputs);
+  cfgEls[key].addEventListener("change", readSettingsInputs);
 }
 
 cfgEls.reset.addEventListener("click", () => {
