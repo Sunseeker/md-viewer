@@ -84,9 +84,8 @@ const JsonOut = struct {
     }
 };
 
-// Extracts payload.path (JSON string, common escapes) into out.
-fn payloadPath(payload: []const u8, out: []u8) ?[]const u8 {
-    const key = "\"path\"";
+// Extracts a top-level JSON string field (common escapes) into out.
+fn payloadString(payload: []const u8, key: []const u8, out: []u8) ?[]const u8 {
     const ki = std.mem.indexOf(u8, payload, key) orelse return null;
     var i = ki + key.len;
     while (i < payload.len and (payload[i] == ' ' or payload[i] == ':')) i += 1;
@@ -125,6 +124,10 @@ fn payloadPath(payload: []const u8, out: []u8) ?[]const u8 {
         o += 1;
     }
     return null;
+}
+
+fn payloadPath(payload: []const u8, out: []u8) ?[]const u8 {
+    return payloadString(payload, "\"path\"", out);
 }
 
 fn mtimeMs(ts: std.Io.Timestamp) i64 {
@@ -325,6 +328,31 @@ fn hConfig(_: *anyopaque, _: bridge.Invocation, output: []u8) anyerror![]const u
     return output[0..w.i];
 }
 
+// Persists the settings panel's JSON to ~/.config/mdv/config.json.
+// The file stays the source of truth; every window's config poll picks
+// the change up.
+fn hConfigWrite(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]const u8 {
+    var w = JsonOut{ .out = output };
+    if (home_len == 0) {
+        try w.raw("{\"ok\":false}");
+        return output[0..w.i];
+    }
+    var raw_buf: [16384]u8 = undefined;
+    const raw = payloadString(invocation.request.payload, "\"raw\"", &raw_buf) orelse return error.BadPayload;
+    var dir_buf: [1200]u8 = undefined;
+    const dir = std.fmt.bufPrint(&dir_buf, "{s}/.config/mdv", .{home_buf[0..home_len]}) catch return error.BadPayload;
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(g_io, dir) catch {};
+    var path_buf: [1240]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/config.json", .{dir}) catch return error.BadPayload;
+    cwd.writeFile(g_io, .{ .sub_path = path, .data = raw }) catch {
+        try w.raw("{\"ok\":false}");
+        return output[0..w.i];
+    };
+    try w.raw("{\"ok\":true}");
+    return output[0..w.i];
+}
+
 const mdv_handlers = [_]bridge.Handler{
     .{ .name = "mdv.pending", .context = @ptrCast(&bridge_ctx), .invoke_fn = hPending },
     .{ .name = "mdv.stat", .context = @ptrCast(&bridge_ctx), .invoke_fn = hStat },
@@ -332,6 +360,7 @@ const mdv_handlers = [_]bridge.Handler{
     .{ .name = "mdv.assign", .context = @ptrCast(&bridge_ctx), .invoke_fn = hAssign },
     .{ .name = "mdv.claim", .context = @ptrCast(&bridge_ctx), .invoke_fn = hClaim },
     .{ .name = "mdv.config", .context = @ptrCast(&bridge_ctx), .invoke_fn = hConfig },
+    .{ .name = "mdv.configWrite", .context = @ptrCast(&bridge_ctx), .invoke_fn = hConfigWrite },
 };
 
 const mdv_command_policies = [_]bridge.CommandPolicy{
@@ -341,6 +370,7 @@ const mdv_command_policies = [_]bridge.CommandPolicy{
     .{ .name = "mdv.assign" },
     .{ .name = "mdv.claim" },
     .{ .name = "mdv.config" },
+    .{ .name = "mdv.configWrite" },
 };
 
 // Builtin `window.zero.*` commands are deny-by-default (Policy.enabled=false

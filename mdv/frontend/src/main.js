@@ -209,39 +209,138 @@ function startPendingPoll() {
   pollPending();
 }
 
-// ---- user config (~/.config/mdv/config.json): fonts + sizing ----
+// ---- user config: fonts + sizing ----
+// Source of truth is ~/.config/mdv/config.json. The settings panel (Cmd+,)
+// applies edits instantly and persists them through mdv.configWrite; the
+// 2s poll keeps external file edits working too.
 
+const CFG_DEFAULTS = { fontFamily: "", monoFamily: "", fontSize: 17, lineHeight: 1.65, contentWidth: 72 };
+const CFG_VARS = ["--mdv-font-body", "--mdv-font-mono", "--mdv-font-size", "--mdv-line-height", "--mdv-content-width"];
+let cfgState = { ...CFG_DEFAULTS };
 let configMtime = 0;
+
+function applyConfigVars(cfg) {
+  const root = document.documentElement.style;
+  for (const v of CFG_VARS) root.removeProperty(v);
+  if (typeof cfg.fontFamily === "string" && cfg.fontFamily) root.setProperty("--mdv-font-body", cfg.fontFamily);
+  if (typeof cfg.monoFamily === "string" && cfg.monoFamily) root.setProperty("--mdv-font-mono", cfg.monoFamily);
+  if (Number.isFinite(cfg.fontSize)) root.setProperty("--mdv-font-size", `${cfg.fontSize}px`);
+  if (Number.isFinite(cfg.lineHeight)) root.setProperty("--mdv-line-height", String(cfg.lineHeight));
+  if (Number.isFinite(cfg.contentWidth)) root.setProperty("--mdv-content-width", `${cfg.contentWidth}ch`);
+}
+
+function cfgFromParsed(parsed) {
+  const cfg = { ...CFG_DEFAULTS };
+  if (typeof parsed.fontFamily === "string") cfg.fontFamily = parsed.fontFamily;
+  if (typeof parsed.monoFamily === "string") cfg.monoFamily = parsed.monoFamily;
+  if (Number.isFinite(parsed.fontSize)) cfg.fontSize = parsed.fontSize;
+  if (Number.isFinite(parsed.lineHeight)) cfg.lineHeight = parsed.lineHeight;
+  if (Number.isFinite(parsed.contentWidth)) cfg.contentWidth = parsed.contentWidth;
+  return cfg;
+}
 
 async function refreshConfig() {
   try {
     const res = await zero.invoke("mdv.config", {});
-    const root = document.documentElement.style;
     if (!res || res.error) {
       if (configMtime !== 0) {
         configMtime = 0;
-        for (const v of ["--mdv-font-body", "--mdv-font-mono", "--mdv-font-size", "--mdv-line-height", "--mdv-content-width"]) root.removeProperty(v);
+        cfgState = { ...CFG_DEFAULTS };
+        applyConfigVars(cfgState);
       }
       return;
     }
     if (res.mtime === configMtime) return;
     configMtime = res.mtime;
-    let cfg;
+    let parsed;
     try {
-      cfg = JSON.parse(res.raw);
+      parsed = JSON.parse(res.raw);
     } catch (err) {
       console.warn("mdv config is not valid JSON, ignoring");
       return;
     }
-    for (const v of ["--mdv-font-body", "--mdv-font-mono", "--mdv-font-size", "--mdv-line-height", "--mdv-content-width"]) root.removeProperty(v);
-    if (typeof cfg.fontFamily === "string" && cfg.fontFamily) root.setProperty("--mdv-font-body", cfg.fontFamily);
-    if (typeof cfg.monoFamily === "string" && cfg.monoFamily) root.setProperty("--mdv-font-mono", cfg.monoFamily);
-    if (Number.isFinite(cfg.fontSize)) root.setProperty("--mdv-font-size", `${cfg.fontSize}px`);
-    if (Number.isFinite(cfg.lineHeight)) root.setProperty("--mdv-line-height", String(cfg.lineHeight));
-    if (Number.isFinite(cfg.contentWidth)) root.setProperty("--mdv-content-width", `${cfg.contentWidth}ch`);
+    cfgState = cfgFromParsed(parsed);
+    applyConfigVars(cfgState);
   } catch (err) {
     // config is best-effort; defaults always work
   }
+}
+
+// ---- settings panel ----
+
+const cfgEls = {
+  panel: document.getElementById("settings"),
+  fontFamily: document.getElementById("cfg-fontFamily"),
+  monoFamily: document.getElementById("cfg-monoFamily"),
+  fontSize: document.getElementById("cfg-fontSize"),
+  lineHeight: document.getElementById("cfg-lineHeight"),
+  contentWidth: document.getElementById("cfg-contentWidth"),
+  reset: document.getElementById("cfg-reset"),
+};
+
+let cfgWriteTimer = null;
+
+function persistConfig() {
+  clearTimeout(cfgWriteTimer);
+  cfgWriteTimer = setTimeout(() => {
+    const out = {};
+    if (cfgState.fontFamily) out.fontFamily = cfgState.fontFamily;
+    if (cfgState.monoFamily) out.monoFamily = cfgState.monoFamily;
+    out.fontSize = cfgState.fontSize;
+    out.lineHeight = cfgState.lineHeight;
+    out.contentWidth = cfgState.contentWidth;
+    zero.invoke("mdv.configWrite", { raw: JSON.stringify(out, null, 2) + "\n" }).catch(() => {});
+  }, 400);
+}
+
+function populateSettings() {
+  cfgEls.fontFamily.value = cfgState.fontFamily;
+  cfgEls.monoFamily.value = cfgState.monoFamily;
+  cfgEls.fontSize.value = cfgState.fontSize;
+  cfgEls.lineHeight.value = cfgState.lineHeight;
+  cfgEls.contentWidth.value = cfgState.contentWidth;
+}
+
+function readSettingsInputs() {
+  cfgState.fontFamily = cfgEls.fontFamily.value.trim();
+  cfgState.monoFamily = cfgEls.monoFamily.value.trim();
+  const size = parseFloat(cfgEls.fontSize.value);
+  const lh = parseFloat(cfgEls.lineHeight.value);
+  const width = parseFloat(cfgEls.contentWidth.value);
+  if (Number.isFinite(size)) cfgState.fontSize = size;
+  if (Number.isFinite(lh)) cfgState.lineHeight = lh;
+  if (Number.isFinite(width)) cfgState.contentWidth = width;
+  applyConfigVars(cfgState);
+  persistConfig();
+}
+
+for (const key of ["fontFamily", "monoFamily", "fontSize", "lineHeight", "contentWidth"]) {
+  cfgEls[key].addEventListener("input", readSettingsInputs);
+}
+
+cfgEls.reset.addEventListener("click", () => {
+  cfgState = { ...CFG_DEFAULTS };
+  populateSettings();
+  applyConfigVars(cfgState);
+  clearTimeout(cfgWriteTimer);
+  zero.invoke("mdv.configWrite", { raw: "{}\n" }).catch(() => {});
+});
+
+function openSettings() {
+  closeToc();
+  populateSettings();
+  cfgEls.panel.hidden = false;
+  requestAnimationFrame(() => cfgEls.panel.classList.add("open"));
+}
+
+function closeSettings() {
+  cfgEls.panel.classList.remove("open");
+  cfgEls.panel.hidden = true;
+}
+
+function toggleSettings() {
+  if (cfgEls.panel.classList.contains("open")) closeSettings();
+  else openSettings();
 }
 
 async function boot() {
@@ -313,12 +412,16 @@ async function openViaDialog() {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeToc();
+    closeSettings();
     return;
   }
   const mod = e.metaKey || e.ctrlKey;
   if (!mod) return;
   const key = e.key.toLowerCase();
-  if (key === "o" && e.shiftKey) {
+  if (key === ",") {
+    e.preventDefault();
+    toggleSettings();
+  } else if (key === "o" && e.shiftKey) {
     e.preventDefault();
     toggleToc();
   } else if (key === "o") {

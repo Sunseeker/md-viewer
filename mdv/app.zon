@@ -16,6 +16,7 @@
             .{ .name = "mdv.assign" },
             .{ .name = "mdv.claim" },
             .{ .name = "mdv.config" },
+            .{ .name = "mdv.configWrite" },
         },
     },
     .file_associations = .{

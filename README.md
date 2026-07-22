@@ -21,11 +21,13 @@ file reachable.
 | Cmd+O | Open file dialog |
 | Cmd+Shift+O | TOC popover (Esc closes) |
 | Cmd+[ / Cmd+] | Back / forward through opened files |
+| Cmd+, | Appearance settings panel (fonts, sizes -- applies live, persists) |
 
 ## Config
 
-`~/.config/mdv/config.json` (all keys optional; polled every 2s, applies
-live to all open docs):
+Preferred: the in-app panel (Cmd+,). Under the hood it writes
+`~/.config/mdv/config.json`, which you can also edit by hand (all keys
+optional; polled every 2s, applies live):
 
 ```json
 {

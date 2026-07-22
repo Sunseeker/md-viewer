@@ -13,9 +13,11 @@ async function readMockFixture() {
 
 function installMockZero() {
   let drained = false;
+  let mockConfig = null;
+  let mockConfigMtime = 0;
 
   window.zero = {
-    async invoke(command, _payload) {
+    async invoke(command, payload) {
       switch (command) {
         case "mdv.pending": {
           if (drained) return { shim: 1, paths: [] };
@@ -25,7 +27,11 @@ function installMockZero() {
         case "mdv.claim":
           return {};
         case "mdv.config":
-          return { error: "missing" };
+          return mockConfig == null ? { error: "missing" } : { mtime: mockConfigMtime, raw: mockConfig };
+        case "mdv.configWrite":
+          mockConfig = payload && payload.raw;
+          mockConfigMtime += 1;
+          return { ok: true };
         case "mdv.assign":
           return { ok: true };
         case "mdv.stat": {
