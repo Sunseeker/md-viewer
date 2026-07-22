@@ -334,10 +334,51 @@ body {
 
 /* ---- TOC popover ---- */
 
+/* Minimap rail: one bar per heading, persistent, sits in the margin
+   outside the reading column. Hover expands the panel below. */
+
+.toc-rail {
+  position: fixed;
+  top: 72px;
+  right: 14px;
+  max-height: calc(100vh - 160px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+  padding: 6px 4px;
+  cursor: pointer;
+  z-index: 9;
+}
+
+.toc-bar {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border);
+  transition: background 120ms ease;
+}
+
+.toc-bar-1 { width: 18px; }
+.toc-bar-2 { width: 12px; }
+.toc-bar-3 { width: 7px; }
+
+.toc-bar.active {
+  background: var(--link);
+}
+
+.toc-rail:hover .toc-bar {
+  background: var(--muted);
+}
+
+.toc-rail:hover .toc-bar.active {
+  background: var(--link);
+}
+
 .toc {
   position: fixed;
-  top: 16px;
-  right: 16px;
+  top: 72px;
+  right: 34px;
   width: 260px;
   max-height: 70vh;
   overflow-y: auto;
@@ -485,4 +526,56 @@ body {
 
 .settings-footer button:hover {
   border-color: var(--muted);
+}
+
+/* TOC active item */
+
+.toc-item.active {
+  color: var(--link);
+}
+
+/* ---- collapsible sections ---- */
+
+.sec-hidden {
+  display: none !important;
+}
+
+.content h1,
+.content h2,
+.content h3 {
+  position: relative;
+}
+
+.sec-toggle {
+  position: absolute;
+  left: -24px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.content h1:hover .sec-toggle,
+.content h2:hover .sec-toggle,
+.content h3:hover .sec-toggle {
+  opacity: 0.7;
+}
+
+.collapsed .sec-toggle {
+  opacity: 0.7;
+  transform: translateY(-50%) rotate(-90deg);
+}
+
+.collapsed {
+  color: var(--muted);
 }

@@ -19,9 +19,14 @@ file reachable.
 | Key | Action |
 |---|---|
 | Cmd+O | Open file dialog |
-| Cmd+Shift+O | TOC popover (Esc closes) |
+| Cmd+Shift+O / hover the right-edge rail | TOC panel (Esc closes) |
 | Cmd+[ / Cmd+] | Back / forward through opened files |
 | Cmd+, | Appearance settings panel (fonts, sizes -- applies live, persists) |
+
+TOC: a minimap rail (one bar per heading) floats at the right edge whenever
+a doc has 2+ headings; hover expands the full outline, the active section
+is highlighted, clicking jumps. Headings h1-h3 are collapsible via the
+chevron that appears on hover (state survives live reloads).
 
 ## Config
 

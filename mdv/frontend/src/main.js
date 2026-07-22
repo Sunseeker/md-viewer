@@ -81,6 +81,8 @@ async function renderPath(path, { preserveScroll } = { preserveScroll: false }) 
   mermaidEntries = await upgradeMermaidBlocks(els.content);
 
   renderToc(collectHeadings(els.content));
+  decorateSections();
+  applyCollapse();
 
   if (preserveScroll) restoreScrollAnchor(anchor);
 }
@@ -429,27 +431,88 @@ async function boot() {
   startPendingPoll();
 }
 
-// ---- TOC popover ----
+// ---- TOC: always-visible minimap rail + expanding panel ----
+//
+// The rail (tiny bars, one per heading, top-right) is persistent and never
+// covers the 72ch reading column on normal window widths. Hovering it (or
+// the menu item / Cmd+Shift+O) expands the full panel; leaving collapses.
+
+const TOC_TIMING = {
+  collapseDelay: 300, // ms of grace when the pointer leaves rail/panel
+  minHeadings: 2, // below this a TOC is noise
+};
+
+const railEl = document.getElementById("toc-rail");
+let tocHeadings = [];
+let tocCollapseTimer = null;
+let activeHeadingId = null;
 
 function renderToc(headings) {
-  if (headings.length === 0) {
+  tocHeadings = headings;
+  const show = headings.length >= TOC_TIMING.minHeadings;
+  railEl.hidden = !show;
+  if (!show) {
+    railEl.innerHTML = "";
     els.toc.innerHTML = "";
+    closeToc();
     return;
   }
   els.toc.innerHTML = headings
     .map((h) => `<div class="toc-item toc-level-${h.level}" data-id="${escapeHtml(h.id)}">${escapeHtml(h.text)}</div>`)
     .join("");
+  railEl.innerHTML = headings
+    .map((h) => `<div class="toc-bar toc-bar-${h.level}" data-id="${escapeHtml(h.id)}"></div>`)
+    .join("");
+  activeHeadingId = null;
+  requestAnimationFrame(updateActiveHeading);
 }
+
+function updateActiveHeading() {
+  if (tocHeadings.length === 0) return;
+  let active = tocHeadings[0].id;
+  for (const h of tocHeadings) {
+    const el = document.getElementById(h.id);
+    if (!el || el.classList.contains("sec-hidden")) continue;
+    const top = el.getBoundingClientRect().top;
+    if (top <= 100 && (top !== 0 || window.scrollY > 0 || h === tocHeadings[0])) active = h.id;
+    if (top > 100) break;
+  }
+  if (active === activeHeadingId) return;
+  activeHeadingId = active;
+  for (const bar of railEl.children) bar.classList.toggle("active", bar.dataset.id === active);
+  for (const item of els.toc.children) item.classList.toggle("active", item.dataset.id === active);
+}
+
+let scrollTick = false;
+window.addEventListener(
+  "scroll",
+  () => {
+    if (scrollTick) return;
+    scrollTick = true;
+    requestAnimationFrame(() => {
+      scrollTick = false;
+      updateActiveHeading();
+    });
+  },
+  { passive: true }
+);
 
 function openToc() {
   if (!els.toc.innerHTML) return;
+  clearTimeout(tocCollapseTimer);
   els.toc.hidden = false;
   requestAnimationFrame(() => els.toc.classList.add("open"));
 }
 
 function closeToc() {
+  clearTimeout(tocCollapseTimer);
   els.toc.classList.remove("open");
   els.toc.hidden = true;
+}
+
+function scheduleTocCollapse() {
+  clearTimeout(tocCollapseTimer);
+  tocCollapseTimer = setTimeout(closeToc, TOC_TIMING.collapseDelay);
 }
 
 function toggleToc() {
@@ -457,13 +520,107 @@ function toggleToc() {
   else openToc();
 }
 
+function jumpToHeading(id) {
+  const target = document.getElementById(id);
+  if (!target) return;
+  expandToReveal(id);
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ---- collapsible heading sections ----
+//
+// Chevron appears on heading hover (persistent while collapsed); a
+// collapsed heading hides everything up to the next heading of the same
+// or higher level. State keys on stable anchor ids, so it survives
+// live reloads.
+
+const collapsedSections = new Set();
+const CHEVRON_SVG = '<svg viewBox="0 0 10 10" width="10" height="10"><path d="M2 3l3 3.2L8 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function headingLevel(el) {
+  return /^H[1-3]$/.test(el.tagName) ? Number(el.tagName[1]) : null;
+}
+
+function decorateSections() {
+  for (const h of els.content.querySelectorAll("h1[id], h2[id], h3[id]")) {
+    const btn = document.createElement("button");
+    btn.className = "sec-toggle";
+    btn.setAttribute("aria-label", "Toggle section");
+    btn.innerHTML = CHEVRON_SVG;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (collapsedSections.has(h.id)) collapsedSections.delete(h.id);
+      else collapsedSections.add(h.id);
+      applyCollapse();
+    });
+    h.prepend(btn);
+  }
+}
+
+function applyCollapse() {
+  let hideLevel = null;
+  for (const el of els.content.children) {
+    const level = headingLevel(el);
+    if (level && hideLevel !== null && level <= hideLevel) hideLevel = null;
+    const hidden = hideLevel !== null;
+    el.classList.toggle("sec-hidden", hidden);
+    if (level) {
+      const collapsed = collapsedSections.has(el.id);
+      el.classList.toggle("collapsed", collapsed);
+      if (!hidden && collapsed) hideLevel = level;
+    }
+  }
+  requestAnimationFrame(updateActiveHeading);
+}
+
+// Expands whichever collapsed sections currently hide `id`.
+function expandToReveal(id) {
+  let changed = false;
+  let hideLevel = null;
+  let hider = null;
+  for (const el of els.content.children) {
+    const level = headingLevel(el);
+    if (level && hideLevel !== null && level <= hideLevel) {
+      hideLevel = null;
+      hider = null;
+    }
+    if (el.id === id && hideLevel !== null && hider) {
+      collapsedSections.delete(hider);
+      changed = true;
+      hideLevel = null;
+      hider = null;
+    }
+    if (level && hideLevel === null && collapsedSections.has(el.id)) {
+      hideLevel = level;
+      hider = el.id;
+    }
+  }
+  if (changed) {
+    applyCollapse();
+    expandToReveal(id); // nested collapses: repeat until the target is clear
+  }
+}
+
+railEl.addEventListener("mouseenter", openToc);
+railEl.addEventListener("mouseleave", scheduleTocCollapse);
+els.toc.addEventListener("mouseenter", () => clearTimeout(tocCollapseTimer));
+els.toc.addEventListener("mouseleave", scheduleTocCollapse);
+
+railEl.addEventListener("click", (e) => {
+  const bar = e.target.closest(".toc-bar");
+  if (bar) jumpToHeading(bar.dataset.id);
+});
+
 els.toc.addEventListener("click", (e) => {
   const item = e.target.closest(".toc-item");
   if (!item) return;
-  const target = document.getElementById(item.dataset.id);
-  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  jumpToHeading(item.dataset.id);
   closeToc();
 });
+
+if (typeof zero.on === "function") {
+  zero.on("mdv:toc", () => toggleToc());
+}
 
 // ---- open dialog ----
 

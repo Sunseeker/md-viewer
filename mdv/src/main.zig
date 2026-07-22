@@ -33,9 +33,11 @@ const App = struct {
     fn onEvent(_: *anyopaque, rt: *native_sdk.Runtime, event: native_sdk.Event) anyerror!void {
         switch (event) {
             .command => |cmd| {
+                const wid = if (cmd.window_id != 0) cmd.window_id else 1;
                 if (std.mem.eql(u8, cmd.name, "mdv.settings")) {
-                    const wid = if (cmd.window_id != 0) cmd.window_id else 1;
                     rt.emitWindowEvent(wid, "mdv:settings", "{}") catch {};
+                } else if (std.mem.eql(u8, cmd.name, "mdv.toc")) {
+                    rt.emitWindowEvent(wid, "mdv:toc", "{}") catch {};
                 }
             },
             else => {},
@@ -425,7 +427,13 @@ pub fn main(init: std.process.Init) !void {
         },
         .builtin_bridge = .{ .enabled = true, .commands = &builtin_command_policies },
         .security = .{
-            .navigation = .{ .allowed_origins = &dev_origins },
+            .navigation = .{
+                .allowed_origins = &dev_origins,
+                // os.openUrl consults this policy; default is deny-all,
+                // which silently killed external links. A viewer opening
+                // links in the system browser is unrestricted by design.
+                .external_links = .{ .action = .open_system_browser, .allowed_urls = &.{"*"} },
+            },
         },
     }, init);
 }
