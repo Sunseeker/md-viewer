@@ -24,7 +24,22 @@ const App = struct {
             .name = "mdv",
             .source = native_sdk.frontend.productionSource(.{ .dist = "frontend/dist" }),
             .source_fn = source,
+            .event_fn = onEvent,
         };
+    }
+
+    // Menu commands arrive here; forward to the window's frontend as a
+    // window event (window.zero.on("mdv:settings", ...)).
+    fn onEvent(_: *anyopaque, rt: *native_sdk.Runtime, event: native_sdk.Event) anyerror!void {
+        switch (event) {
+            .command => |cmd| {
+                if (std.mem.eql(u8, cmd.name, "mdv.settings")) {
+                    const wid = if (cmd.window_id != 0) cmd.window_id else 1;
+                    rt.emitWindowEvent(wid, "mdv:settings", "{}") catch {};
+                }
+            },
+            else => {},
+        }
     }
 
     fn source(context: *anyopaque) anyerror!native_sdk.WebViewSource {

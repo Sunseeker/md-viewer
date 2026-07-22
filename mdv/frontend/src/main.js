@@ -343,6 +343,12 @@ function toggleSettings() {
   else openSettings();
 }
 
+// Settings > Appearance... menu item (and its Cmd+, key equivalent),
+// forwarded by the Zig core as a window event.
+if (typeof zero.on === "function") {
+  zero.on("mdv:settings", () => toggleSettings());
+}
+
 async function boot() {
   refreshConfig();
   setInterval(refreshConfig, 2000);

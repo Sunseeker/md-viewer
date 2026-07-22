@@ -19,6 +19,17 @@
             .{ .name = "mdv.configWrite" },
         },
     },
+    .commands = .{
+        .{ .id = "mdv.settings", .title = "Appearance Settings" },
+    },
+    .menus = .{
+        .{
+            .title = "Settings",
+            .items = .{
+                .{ .label = "Appearance...", .command = "mdv.settings", .key = ",", .modifiers = .{"command"} },
+            },
+        },
+    },
     .file_associations = .{
         .{
             .name = "Markdown Document",
