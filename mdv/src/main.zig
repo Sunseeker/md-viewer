@@ -12,6 +12,8 @@ const max_file_bytes = 400 * 1024;
 var file_buf: [max_file_bytes]u8 = undefined;
 var bridge_ctx: u8 = 0;
 var g_io: std.Io = undefined;
+var home_buf: [1024]u8 = undefined;
+var home_len: usize = 0;
 
 const App = struct {
     env_map: *std.process.Environ.Map,
@@ -283,12 +285,53 @@ fn hClaim(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![
     return output[0..w.i];
 }
 
+// Serves ~/.config/mdv/config.json raw; the frontend parses and applies it
+// (fonts, sizes). {"error":"missing"} when absent/oversized -- never fatal.
+fn hConfig(_: *anyopaque, _: bridge.Invocation, output: []u8) anyerror![]const u8 {
+    var w = JsonOut{ .out = output };
+    const missing = "{\"error\":\"missing\"}";
+    if (home_len == 0) {
+        try w.raw(missing);
+        return output[0..w.i];
+    }
+    var path_buf: [1200]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/.config/mdv/config.json", .{home_buf[0..home_len]}) catch {
+        try w.raw(missing);
+        return output[0..w.i];
+    };
+    var f = std.Io.Dir.cwd().openFile(g_io, path, .{}) catch {
+        try w.raw(missing);
+        return output[0..w.i];
+    };
+    defer f.close(g_io);
+    const st = f.stat(g_io) catch {
+        try w.raw(missing);
+        return output[0..w.i];
+    };
+    var cfg_buf: [16384]u8 = undefined;
+    if (st.size > cfg_buf.len) {
+        try w.raw(missing);
+        return output[0..w.i];
+    }
+    const n = f.readPositionalAll(g_io, &cfg_buf, 0) catch {
+        try w.raw(missing);
+        return output[0..w.i];
+    };
+    try w.raw("{\"mtime\":");
+    try w.int(mtimeMs(st.mtime));
+    try w.raw(",\"raw\":");
+    try w.str(cfg_buf[0..n]);
+    try w.raw("}");
+    return output[0..w.i];
+}
+
 const mdv_handlers = [_]bridge.Handler{
     .{ .name = "mdv.pending", .context = @ptrCast(&bridge_ctx), .invoke_fn = hPending },
     .{ .name = "mdv.stat", .context = @ptrCast(&bridge_ctx), .invoke_fn = hStat },
     .{ .name = "mdv.read", .context = @ptrCast(&bridge_ctx), .invoke_fn = hRead },
     .{ .name = "mdv.assign", .context = @ptrCast(&bridge_ctx), .invoke_fn = hAssign },
     .{ .name = "mdv.claim", .context = @ptrCast(&bridge_ctx), .invoke_fn = hClaim },
+    .{ .name = "mdv.config", .context = @ptrCast(&bridge_ctx), .invoke_fn = hConfig },
 };
 
 const mdv_command_policies = [_]bridge.CommandPolicy{
@@ -297,12 +340,34 @@ const mdv_command_policies = [_]bridge.CommandPolicy{
     .{ .name = "mdv.read" },
     .{ .name = "mdv.assign" },
     .{ .name = "mdv.claim" },
+    .{ .name = "mdv.config" },
+};
+
+// Builtin `window.zero.*` commands are deny-by-default (Policy.enabled=false
+// unless the app opts in) -- without this list, zero.windows.create is
+// rejected and a second opened file never gets a window.
+const builtin_command_policies = [_]bridge.CommandPolicy{
+    .{ .name = "native-sdk.window.create" },
+    .{ .name = "native-sdk.window.list" },
+    .{ .name = "native-sdk.window.focus" },
+    .{ .name = "native-sdk.window.close" },
+    .{ .name = "native-sdk.dialog.openFile" },
+    .{ .name = "native-sdk.os.openUrl" },
+    .{ .name = "native-sdk.os.revealPath" },
+    .{ .name = "native-sdk.os.addRecentDocument" },
+    .{ .name = "native-sdk.os.clearRecentDocuments" },
 };
 
 const dev_origins = [_][]const u8{ "zero://app", "zero://inline", "http://127.0.0.1:5173" };
 
 pub fn main(init: std.process.Init) !void {
     g_io = init.io;
+    if (init.environ_map.get("HOME")) |home| {
+        if (home.len <= home_buf.len) {
+            @memcpy(home_buf[0..home.len], home);
+            home_len = home.len;
+        }
+    }
     var app = App{ .env_map = init.environ_map };
     try runner.runWithOptions(app.app(), .{
         .app_name = "mdv",
@@ -313,6 +378,7 @@ pub fn main(init: std.process.Init) !void {
             .policy = .{ .enabled = true, .commands = &mdv_command_policies },
             .registry = .{ .handlers = &mdv_handlers },
         },
+        .builtin_bridge = .{ .enabled = true, .commands = &builtin_command_policies },
         .security = .{
             .navigation = .{ .allowed_origins = &dev_origins },
         },

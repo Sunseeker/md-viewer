@@ -152,28 +152,38 @@ function startWatching() {
   }, 500);
 }
 
-// ---- window / doc dispatch ----
+// ---- doc dispatch: single-window, replace in place ----
+//
+// SDK 0.5.4's dynamic window.create hides the previous window on macOS
+// (created windows also ignore the requested frame), so one-window-per-file
+// is not viable yet. A newly opened file replaces the current document;
+// Cmd+[ / Cmd+] walk the in-window history. Revisit when the SDK's
+// multi-window surface matures.
 
-function newWindowLabel() {
-  const id = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).slice(0, 8);
-  return `doc-${id}`;
-}
+const docHistory = [];
+const docFuture = [];
 
-async function openInNewWindow(path) {
-  const created = await zero.windows.create({
-    label: newWindowLabel(),
-    title: basename(path),
-    width: 860,
-    height: 900,
-    restoreState: false,
-  });
-  await zero.invoke("mdv.assign", { windowId: created.id, path });
-}
-
-async function dispatchPaths(paths) {
-  for (const path of paths) {
-    await openInNewWindow(path);
+async function openDoc(path, { remember } = { remember: true }) {
+  if (path === currentPath) return;
+  if (remember && currentPath) {
+    docHistory.push(currentPath);
+    docFuture.length = 0;
   }
+  await openInThisWindow(path);
+}
+
+async function goBack() {
+  if (docHistory.length === 0) return;
+  const prev = docHistory.pop();
+  if (currentPath) docFuture.push(currentPath);
+  await openInThisWindow(prev);
+}
+
+async function goForward() {
+  if (docFuture.length === 0) return;
+  const next = docFuture.pop();
+  if (currentPath) docHistory.push(currentPath);
+  await openInThisWindow(next);
 }
 
 async function pollPending() {
@@ -181,13 +191,13 @@ async function pollPending() {
     const res = await zero.invoke("mdv.pending", {});
     const paths = (res && res.paths) || [];
     if (paths.length === 0) return;
-    if (currentPath === null) {
-      const [first, ...rest] = paths;
-      await openInThisWindow(first);
-      await dispatchPaths(rest);
-    } else {
-      await dispatchPaths(paths);
+    // Newest open wins the window; earlier ones stay reachable via
+    // history and File > Open Recent.
+    for (const path of paths.slice(0, -1)) {
+      zero.os.addRecentDocument(path).catch(() => {});
+      if (path !== currentPath) docHistory.push(path);
     }
+    await openDoc(paths[paths.length - 1]);
   } catch (err) {
     // transient bridge hiccup -- retry next tick
   }
@@ -199,7 +209,44 @@ function startPendingPoll() {
   pollPending();
 }
 
+// ---- user config (~/.config/mdv/config.json): fonts + sizing ----
+
+let configMtime = 0;
+
+async function refreshConfig() {
+  try {
+    const res = await zero.invoke("mdv.config", {});
+    const root = document.documentElement.style;
+    if (!res || res.error) {
+      if (configMtime !== 0) {
+        configMtime = 0;
+        for (const v of ["--mdv-font-body", "--mdv-font-mono", "--mdv-font-size", "--mdv-line-height", "--mdv-content-width"]) root.removeProperty(v);
+      }
+      return;
+    }
+    if (res.mtime === configMtime) return;
+    configMtime = res.mtime;
+    let cfg;
+    try {
+      cfg = JSON.parse(res.raw);
+    } catch (err) {
+      console.warn("mdv config is not valid JSON, ignoring");
+      return;
+    }
+    for (const v of ["--mdv-font-body", "--mdv-font-mono", "--mdv-font-size", "--mdv-line-height", "--mdv-content-width"]) root.removeProperty(v);
+    if (typeof cfg.fontFamily === "string" && cfg.fontFamily) root.setProperty("--mdv-font-body", cfg.fontFamily);
+    if (typeof cfg.monoFamily === "string" && cfg.monoFamily) root.setProperty("--mdv-font-mono", cfg.monoFamily);
+    if (Number.isFinite(cfg.fontSize)) root.setProperty("--mdv-font-size", `${cfg.fontSize}px`);
+    if (Number.isFinite(cfg.lineHeight)) root.setProperty("--mdv-line-height", String(cfg.lineHeight));
+    if (Number.isFinite(cfg.contentWidth)) root.setProperty("--mdv-content-width", `${cfg.contentWidth}ch`);
+  } catch (err) {
+    // config is best-effort; defaults always work
+  }
+}
+
 async function boot() {
+  refreshConfig();
+  setInterval(refreshConfig, 2000);
   try {
     const claimed = await zero.invoke("mdv.claim", {});
     if (claimed && claimed.path) {
@@ -258,11 +305,7 @@ async function openViaDialog() {
   if (!result) return;
   const path = Array.isArray(result) ? result[0] : result;
   if (!path) return;
-  if (currentPath === null) {
-    await openInThisWindow(path);
-  } else {
-    await openInNewWindow(path);
-  }
+  await openDoc(path);
 }
 
 // ---- keyboard shortcuts ----
@@ -281,6 +324,12 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "o") {
     e.preventDefault();
     openViaDialog();
+  } else if (key === "[") {
+    e.preventDefault();
+    goBack();
+  } else if (key === "]") {
+    e.preventDefault();
+    goForward();
   }
 });
 
@@ -308,7 +357,7 @@ els.content.addEventListener("click", (e) => {
   const resolved = resolveRelativePath(currentPath || "", href);
   const pathOnly = href.split(/[?#]/)[0];
   if (/\.(md|markdown)$/i.test(pathOnly)) {
-    openInNewWindow(resolved).catch(() => {});
+    openDoc(resolved).catch(() => {});
   } else {
     zero.os.revealPath(resolved).catch(() => {});
   }

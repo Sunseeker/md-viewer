@@ -24,6 +24,8 @@ function installMockZero() {
         }
         case "mdv.claim":
           return {};
+        case "mdv.config":
+          return { error: "missing" };
         case "mdv.assign":
           return { ok: true };
         case "mdv.stat": {

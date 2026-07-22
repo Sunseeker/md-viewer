@@ -6,25 +6,56 @@ Zig core + system WKWebView, ~no chrome, auto light/dark.
 
 Features: GFM (tables, task lists), shiki syntax highlighting, mermaid
 diagrams, YAML frontmatter chips, live reload on file change (scroll
-preserved), TOC popover (Cmd+Shift+O), relative .md links open new windows,
-Cmd+O open dialog. View-only by design.
+preserved), TOC popover, relative .md links, Cmd+O open dialog, in-window
+history. View-only by design.
+
+Single-window model: a newly opened file replaces the current document
+(SDK 0.5.4's dynamic window.create hides the previous window on macOS, so
+one-window-per-file is parked until the SDK matures). History keeps every
+file reachable.
+
+## Keys
+
+| Key | Action |
+|---|---|
+| Cmd+O | Open file dialog |
+| Cmd+Shift+O | TOC popover (Esc closes) |
+| Cmd+[ / Cmd+] | Back / forward through opened files |
+
+## Config
+
+`~/.config/mdv/config.json` (all keys optional; polled every 2s, applies
+live to all open docs):
+
+```json
+{
+  "fontFamily": "-apple-system, ui-sans-serif, sans-serif",
+  "monoFamily": "ui-monospace, 'SF Mono', monospace",
+  "fontSize": 17,
+  "lineHeight": 1.65,
+  "contentWidth": 72
+}
+```
+
+`fontSize` in px, `contentWidth` in ch. Delete the file to return to
+defaults.
 
 ## Build
 
-Prereqs: Zig 0.16, `@native-sdk/cli` 0.4.4 global (`npm i -g @native-sdk/cli@0.4.4`),
+Prereqs: Zig 0.16, `@native-sdk/cli` 0.5.4 global (`npm i -g @native-sdk/cli@0.5.4`),
 node/npm.
 
 ```bash
 cd mdv
-zig build package -Doptimize=ReleaseSafe
-# -> zig-out/package/mdv-0.1.0-macos-ReleaseSafe.app
+zig build package
+# -> zig-out/package/mdv-0.1.0-macos-ReleaseFast.app
 ```
 
 ## Install + default handler
 
 ```bash
 rm -rf /Applications/mdv.app
-cp -R mdv/zig-out/package/mdv-0.1.0-macos-ReleaseSafe.app /Applications/mdv.app
+cp -R mdv/zig-out/package/mdv-0.1.0-macos-ReleaseFast.app /Applications/mdv.app
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/mdv.app
 duti -s au.com.bellizzi.mdv .md all
 duti -s au.com.bellizzi.mdv .markdown all

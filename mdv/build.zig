@@ -37,7 +37,14 @@ const app_exe_name = "mdv";
 
 pub fn build(b: *std.Build) void {
     const target = nativeSdkTarget(b);
-    const optimize = b.standardOptimizeOption(.{});
+    // -Doptimize is registered by hand (not the std helper) so the
+    // graph can tell "unset" from "explicit": run/dev default to
+    // Debug for the edit loop, while `zig build package` wraps its own
+    // release-shaped exe — the same split `native dev`/`native build`
+    // apply. An explicit -Doptimize (or --release) pins both roles.
+    const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
+    const optimize = optimizeMode(b, optimize_request, .Debug);
+    const package_optimize = optimizeMode(b, optimize_request, .ReleaseFast);
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
@@ -49,7 +56,7 @@ pub fn build(b: *std.Build) void {
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
     const native_sdk_path = b.option([]const u8, "native-sdk-path", "Path to the Native SDK framework checkout") orelse default_native_sdk_path;
-    const optimize_name = @tagName(optimize);
+    const package_optimize_name = @tagName(package_optimize);
     const selected_platform: PlatformOption = switch (platform_option) {
         .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .@"null",
         else => platform_option,
@@ -100,15 +107,24 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
+        // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
+        // miscompiles the SysV C calling convention for the long
+        // mixed-argument signatures the platform hosts use, shifting
+        // stack-passed pointers by one slot (a Debug dev run on
+        // x86_64 Linux crashes creating its first shell view). Force
+        // LLVM there, mirroring the Native SDK build graph; Release
+        // modes already use LLVM, so only Debug changes.
+        .use_llvm = useLlvmWorkaround(target),
     });
-    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
-    if (selected_platform == .macos) {
-        // Open-files shim: injects the application:openFiles: delegate method
-        // the SDK's AppKit host lacks (see src/open_files.m).
-        const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
-        const shim_flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0" };
-        app_mod.addCSourceFile(.{ .file = b.path("src/open_files.m"), .flags = shim_flags });
+    // Windows subsystem posture (mirrors the Native SDK build graph):
+    // release-shaped exes are GUI-subsystem so the app never flashes a
+    // console behind its window; Debug keeps the console for dev logs.
+    // Redirected logging still works on GUI exes - only console
+    // AUTO-allocation is subsystem-gated.
+    if (target.result.os.tag == .windows and optimize != .Debug) {
+        exe.subsystem = .windows;
     }
+    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
 
     const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
@@ -135,6 +151,36 @@ pub fn build(b: *std.Build) void {
     const dev_step = b.step("dev", "Run the frontend dev server and native shell");
     dev_step.dependOn(&dev.step);
 
+    // `zig build package` wraps its own exe: release-shaped by default
+    // (ReleaseFast, GUI subsystem on Windows) so the packaged artifact
+    // is never a Debug console binary just because the dev loop
+    // defaults to Debug. When -Doptimize/--release pinned one mode for
+    // everything, the roles agree and the dev exe is reused as-is.
+    const package_exe = if (package_optimize == optimize) exe else pkg: {
+        const package_sdk_mod = nativeSdkModule(b, target, package_optimize, native_sdk_path);
+        const package_runner_mod = localModule(b, target, package_optimize, "src/runner.zig");
+        package_runner_mod.addImport("native_sdk", package_sdk_mod);
+        package_runner_mod.addImport("build_options", options_mod);
+        package_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+        const package_app_mod = localModule(b, target, package_optimize, "src/main.zig");
+        package_app_mod.addImport("native_sdk", package_sdk_mod);
+        package_app_mod.addImport("runner", package_runner_mod);
+        const built = b.addExecutable(.{
+            .name = app_exe_name,
+            .root_module = package_app_mod,
+            // Same self-hosted x86_64 workaround as the dev exe above
+            // (only reachable when -Doptimize pins Debug for both roles).
+            .use_llvm = useLlvmWorkaround(target),
+        });
+        // Same subsystem posture as the dev exe above, keyed on this
+        // exe's own mode: release-shaped Windows exes are GUI-subsystem.
+        if (target.result.os.tag == .windows and package_optimize != .Debug) {
+            built.subsystem = .windows;
+        }
+        linkPlatform(b, target, package_app_mod, built, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
+        break :pkg built;
+    };
+
     const package = b.addSystemCommand(&.{
         "native",
         "package",
@@ -144,9 +190,9 @@ pub fn build(b: *std.Build) void {
         "app.zon",
         "--assets","frontend/dist",
         "--optimize",
-        optimize_name,
+        package_optimize_name,
         "--output",
-        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
+        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), package_optimize_name, packageSuffix(package_target) }),
         "--binary",
     });
     // The CLI resolves SDK-owned package inputs (the vendored WebView2
@@ -154,7 +200,7 @@ pub fn build(b: *std.Build) void {
     // belong to a different checkout than the one this build compiled
     // against, so hand the same root over explicitly.
     package.setEnvironmentVariable("NATIVE_SDK_PATH", b.pathFromRoot(native_sdk_path));
-    package.addFileArg(exe.getEmittedBin());
+    package.addFileArg(package_exe.getEmittedBin());
     package.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
     // Forward the RESOLVED web-layer decision, never the raw inputs:
     // this graph already decided web vs native-only for the exe it is
@@ -164,7 +210,7 @@ pub fn build(b: *std.Build) void {
     // exe/package agreement structural.
     package.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
     if (cef_auto_install) package.addArg("--cef-auto-install");
-    package.step.dependOn(&exe.step);
+    package.step.dependOn(&package_exe.step);
     package.step.dependOn(&frontend_build.step);
     const package_step = b.step("package", "Create a local package artifact");
     package_step.dependOn(&package.step);
@@ -172,6 +218,33 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = app_mod });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C
+// calling convention for long mixed int/pointer/double signatures
+// (the platform hosts' view-create calls) and f32-heavy ones (the
+// embed viewport ABI): stack-passed arguments arrive shifted, so a
+// Debug x86_64 build crashes at the first platform call that passes
+// strings on the stack. Force the LLVM backend on x86_64 until the
+// upstream backend is fixed; Release modes already default to LLVM,
+// so this only changes Debug builds.
+fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64) true else null;
+}
+
+// Resolve the optimize mode for one exe role (mirrors the Native SDK
+// build graph): an explicit -Doptimize wins for every role, --release
+// resolves through zig's release_mode, and only when neither was
+// passed does the role keep its own default — Debug for the dev loop,
+// ReleaseFast for the exe `zig build package` wraps.
+fn optimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
+    if (requested) |mode| return mode;
+    return switch (b.release_mode) {
+        .off => default_mode,
+        .any, .fast => .ReleaseFast,
+        .safe => .ReleaseSafe,
+        .small => .ReleaseSmall,
+    };
 }
 
 fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
@@ -262,6 +335,9 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/appkit_host.m"), .flags = flags });
+                // mdv open-files shim (see src/open_files.m). Added here so
+                // both the dev exe and the package exe carry it.
+                app_mod.addCSourceFile(.{ .file = b.path("src/open_files.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
             .chromium => {
@@ -315,7 +391,14 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 // the layer stays out even on machines where the
                 // development package is installed — libwebkitgtk is
                 // neither linked nor required at runtime, and the
-                // executable carries no WebKit reference at all.
+                // executable carries no WebKit reference at all. This
+                // is the expected, configured state of every canvas
+                // app on Linux, so the stub compile is deliberately
+                // silent — no build note, no compiler diagnostic (the
+                // host's seam comment explains why even an
+                // informational pragma is dangerous); a stubbed host
+                // teaches at runtime by reporting WebViewNotFound the
+                // moment an app actually uses a WebView.
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
                 app_mod.linkSystemLibrary("gtk4", .{});
                 app_mod.linkSystemLibrary("dl", .{});
@@ -361,6 +444,14 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 // headers are reachable through the system include paths
                 // — no WebView2Loader.dll is installed or path-wired,
                 // and the executable carries no reference to it at all.
+                // This is the expected, configured state of every
+                // canvas app on Windows, so the stub compile is
+                // deliberately silent — no build note, no compiler
+                // diagnostic (the host's seam comment explains why
+                // even an informational pragma is dangerous); a
+                // stubbed host teaches at runtime by reporting
+                // WebViewNotFound the moment an app actually uses a
+                // WebView.
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
             },
             .chromium => {

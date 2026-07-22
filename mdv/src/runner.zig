@@ -39,6 +39,7 @@ pub const RunOptions = struct {
         var info: native_sdk.AppInfo = .{
             .app_name = self.app_name,
             .has_web_content = manifestHasWebContent(),
+            .declares_tray = manifestDeclaresTrayCapability(),
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
@@ -47,6 +48,26 @@ pub const RunOptions = struct {
         if (windows.len > 0) {
             info.main_window = windows[0];
             info.windows = windows;
+        } else {
+            // Scene-first apps declare their one window under
+            // `.shell.windows` — the startup window the host creates
+            // adopts that declaration when the scene loads, but its
+            // CHROME is fixed at create time, so the manifest's
+            // titlebar style threads through here. Same for visibility:
+            // a canvas-first startup window is created ordered-out and
+            // shown after its first canvas frame presents, so launch
+            // never flashes a blank window.
+            info.main_window.titlebar = manifestShellStartupTitlebar();
+            info.main_window.resizable = manifestShellStartupResizable();
+            info.main_window.show = manifestShellStartupShowMode();
+            // Min-size floors ride the create call like the titlebar:
+            // the scene re-applies size/title later, but the window's
+            // enforced floor is host state from the first frame on.
+            info.main_window.min_width = manifestShellStartupMinSize("min_width");
+            info.main_window.min_height = manifestShellStartupMinSize("min_height");
+            // Close handling is host window state like the titlebar:
+            // the manifest's declaration rides the host create.
+            info.main_window.close_policy = manifestShellStartupClosePolicy();
         }
         return info;
     }
@@ -170,6 +191,10 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .titlebar = windowTitlebarStyle(window),
+        .min_width = windowMinSize(window, "min_width"),
+        .min_height = windowMinSize(window, "min_height"),
+        .close_policy = windowClosePolicy(window),
     };
 }
 
@@ -201,6 +226,125 @@ fn windowRestorePolicy(comptime window: anytype) native_sdk.WindowRestorePolicy 
     if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     @compileError("unknown app.zon window restore_policy");
+}
+
+/// Window-enforced content min-size floor from app.zon. Validated at
+/// comptime like the titlebar style: a negative floor is an authoring
+/// error, not a silent clamp.
+fn windowMinSize(comptime window: anytype, comptime field: []const u8) f32 {
+    const value: f32 = comptime windowFloat(window, field, 0);
+    comptime {
+        if (!(value >= 0)) @compileError("app.zon window " ++ field ++ " must be non-negative");
+    }
+    return value;
+}
+
+fn windowTitlebarStyle(comptime window: anytype) native_sdk.WindowTitlebarStyle {
+    if (comptime !@hasField(@TypeOf(window), "titlebar")) return .standard;
+    const value = window.titlebar;
+    if (comptime std.mem.eql(u8, value, "standard")) return .standard;
+    if (comptime std.mem.eql(u8, value, "hidden_inset")) return .hidden_inset;
+    if (comptime std.mem.eql(u8, value, "hidden_inset_tall")) return .hidden_inset_tall;
+    if (comptime std.mem.eql(u8, value, "chromeless")) return .chromeless;
+    @compileError("unknown app.zon window titlebar style");
+}
+
+/// The startup window's titlebar style for scene-first apps: app.zon's
+/// `.shell.windows[0].titlebar`. Chrome cannot change after the host
+/// creates the window, so it must ride the create call — unlike
+/// size/title, which the loading scene re-applies.
+fn manifestShellStartupTitlebar() native_sdk.WindowTitlebarStyle {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .standard;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .standard;
+    if (comptime shell.windows.len == 0) return .standard;
+    return windowTitlebarStyle(shell.windows[0]);
+}
+
+/// The startup window's resizability for scene-first apps: like the
+/// titlebar style, resizable is window chrome fixed at create time.
+fn manifestShellStartupResizable() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return true;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return true;
+    if (comptime shell.windows.len == 0) return true;
+    return windowBool(shell.windows[0], "resizable", true);
+}
+
+/// The startup window's close policy for scene-first apps: app.zon's
+/// `.shell.windows[0].close_policy`. Like the titlebar, close handling
+/// is host window state fixed at create time.
+fn manifestShellStartupClosePolicy() native_sdk.WindowClosePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .quit;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .quit;
+    if (comptime shell.windows.len == 0) return .quit;
+    return windowClosePolicy(shell.windows[0]);
+}
+
+/// The startup window's content min-size floor for scene-first apps:
+/// app.zon's `.shell.windows[0].min_width`/`.min_height` (0 = none).
+fn manifestShellStartupMinSize(comptime field: []const u8) f32 {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return 0;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return 0;
+    if (comptime shell.windows.len == 0) return 0;
+    return windowMinSize(shell.windows[0], field);
+}
+
+/// Present-before-show for the STARTUP window: when app.zon's first
+/// shell window hosts a canvas (`gpu_surface` view), the host creates
+/// it ordered-out and it becomes visible after the first canvas frame
+/// presents. Webview-first startup windows keep immediate visibility.
+fn manifestShellStartupShowMode() native_sdk.WindowShowMode {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .immediate;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .immediate;
+    if (comptime shell.windows.len == 0) return .immediate;
+    const window = shell.windows[0];
+    if (comptime !@hasField(@TypeOf(window), "views")) return .immediate;
+    inline for (window.views) |view| {
+        if (comptime @hasField(@TypeOf(view), "kind")) {
+            if (comptime std.mem.eql(u8, view.kind, "gpu_surface")) return .on_first_present;
+        }
+    }
+    return .immediate;
+}
+
+/// What the window's close affordance does, from app.zon. `.hide` is
+/// validated against the TARGET platform at comptime: a host with no
+/// affordance to bring a hidden window back (GTK has no status item;
+/// windows without a declared tray, since hiding removes the taskbar
+/// entry and windows has no dock) refuses the declaration here, at
+/// build time, instead of stranding a hidden window at runtime.
+fn windowClosePolicy(comptime window: anytype) native_sdk.WindowClosePolicy {
+    if (comptime !@hasField(@TypeOf(window), "close_policy")) return .quit;
+    const value = window.close_policy;
+    if (comptime std.mem.eql(u8, value, "quit")) return .quit;
+    if (comptime std.mem.eql(u8, value, "hide")) {
+        if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
+            @compileError("app.zon window close_policy \"hide\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \"quit\" (the default), or scope the .hide declaration to macos/windows builds");
+        }
+        if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
+            if (comptime !manifestDeclaresTrayCapability()) {
+                @compileError("app.zon window close_policy \"hide\" on windows requires the \"tray\" capability: hiding removes the taskbar entry and windows has no dock-reopen path, so only a status item (tray) could bring the hidden window back - add \"tray\" to .capabilities and install a status item, or declare \"quit\" (the default); macos needs no capability because the dock reopen path always exists");
+            }
+        }
+        return .hide;
+    }
+    @compileError("unknown app.zon window close_policy - supported values: \"quit\" (close really closes; the default) and \"hide\" (the menu-bar-app shape: close hides the window and the app keeps running)");
+}
+
+/// Whether app.zon declares the "tray" capability — the status item
+/// `.hide` leans on where the OS has no built-in re-show affordance.
+/// Evaluated at comptime over the manifest import, like the web scan.
+fn manifestDeclaresTrayCapability() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    inline for (app_manifest.capabilities) |capability| {
+        const name: []const u8 = capability;
+        if (comptime std.mem.eql(u8, name, "tray")) return true;
+    }
+    return false;
 }
 
 fn menuItem(comptime item: anytype) native_sdk.MenuItem {

@@ -16,7 +16,9 @@ files and renders them beautifully. View-only. Built on Vercel Native
 - Syntax-highlighted fenced code blocks
 - Mermaid diagrams (lazy-loaded only when a mermaid fence exists)
 - YAML frontmatter rendered as a compact key/value chip block
-- One window per file
+- One window per file (AMENDED 2026-07-22: single window, replace in place +
+  Cmd+[/Cmd+] history -- SDK 0.5.4 window.create hides the previous window
+  on macOS and ignores the requested frame; revisit when the SDK matures)
 - Live reload on file change, preserving scroll position
 - TOC popover (Cmd+Shift+O) built from headings
 - Relative `.md` links open in a new viewer window; external links open in browser
