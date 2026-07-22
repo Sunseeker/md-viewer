@@ -1,0 +1,6 @@
+mdv/zig-out/
+mdv/.zig-cache/
+mdv/frontend/node_modules/
+mdv/frontend/dist/
+mdv/.tmp/
+.DS_Store

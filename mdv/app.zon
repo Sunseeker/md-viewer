@@ -13,6 +13,8 @@
             .{ .name = "mdv.pending" },
             .{ .name = "mdv.stat" },
             .{ .name = "mdv.read" },
+            .{ .name = "mdv.assign" },
+            .{ .name = "mdv.claim" },
         },
     },
     .file_associations = .{

@@ -129,6 +129,60 @@ fn mtimeMs(ts: std.Io.Timestamp) i64 {
     return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
 }
 
+// Extracts payload.windowId (JSON number, integer digits only) from payload.
+fn payloadWindowId(payload: []const u8) ?u64 {
+    const key = "\"windowId\"";
+    const ki = std.mem.indexOf(u8, payload, key) orelse return null;
+    var i = ki + key.len;
+    while (i < payload.len and (payload[i] == ' ' or payload[i] == ':')) i += 1;
+    const start = i;
+    while (i < payload.len and payload[i] >= '0' and payload[i] <= '9') i += 1;
+    if (i == start) return null;
+    return std.fmt.parseInt(u64, payload[start..i], 10) catch null;
+}
+
+// ---- window -> path assignment table ----
+
+const WindowSlot = struct {
+    window_id: u64 = 0,
+    len: usize = 0,
+    path: [4096]u8 = undefined,
+};
+
+var window_paths: [32]WindowSlot = [_]WindowSlot{.{}} ** 32;
+
+// Stores `path` for `window_id`, overwriting an existing entry for the same
+// window or claiming the first free slot. False on bad input or a full
+// table with no matching entry.
+fn assignPath(table: []WindowSlot, window_id: u64, path: []const u8) bool {
+    if (window_id == 0) return false;
+    for (table) |*slot| {
+        if (slot.window_id == window_id) {
+            if (path.len > slot.path.len) return false;
+            @memcpy(slot.path[0..path.len], path);
+            slot.len = path.len;
+            return true;
+        }
+    }
+    for (table) |*slot| {
+        if (slot.window_id == 0) {
+            if (path.len > slot.path.len) return false;
+            slot.window_id = window_id;
+            @memcpy(slot.path[0..path.len], path);
+            slot.len = path.len;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn claimPath(table: []const WindowSlot, window_id: u64) ?[]const u8 {
+    for (table) |slot| {
+        if (slot.window_id == window_id) return slot.path[0..slot.len];
+    }
+    return null;
+}
+
 // ---- bridge handlers ----
 
 fn hPending(_: *anyopaque, _: bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -204,16 +258,45 @@ fn hRead(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]
     return output[0..w.i];
 }
 
+fn hAssign(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]const u8 {
+    var path_buf: [4096]u8 = undefined;
+    const path = payloadPath(invocation.request.payload, &path_buf) orelse return error.BadPath;
+    const window_id = payloadWindowId(invocation.request.payload) orelse return error.BadWindowId;
+    var w = JsonOut{ .out = output };
+    if (assignPath(&window_paths, window_id, path)) {
+        try w.raw("{\"ok\":true}");
+    } else {
+        try w.raw("{\"ok\":false}");
+    }
+    return output[0..w.i];
+}
+
+fn hClaim(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]const u8 {
+    var w = JsonOut{ .out = output };
+    if (claimPath(&window_paths, invocation.source.window_id)) |path| {
+        try w.raw("{\"path\":");
+        try w.str(path);
+        try w.raw("}");
+    } else {
+        try w.raw("{}");
+    }
+    return output[0..w.i];
+}
+
 const mdv_handlers = [_]bridge.Handler{
     .{ .name = "mdv.pending", .context = @ptrCast(&bridge_ctx), .invoke_fn = hPending },
     .{ .name = "mdv.stat", .context = @ptrCast(&bridge_ctx), .invoke_fn = hStat },
     .{ .name = "mdv.read", .context = @ptrCast(&bridge_ctx), .invoke_fn = hRead },
+    .{ .name = "mdv.assign", .context = @ptrCast(&bridge_ctx), .invoke_fn = hAssign },
+    .{ .name = "mdv.claim", .context = @ptrCast(&bridge_ctx), .invoke_fn = hClaim },
 };
 
 const mdv_command_policies = [_]bridge.CommandPolicy{
     .{ .name = "mdv.pending" },
     .{ .name = "mdv.stat" },
     .{ .name = "mdv.read" },
+    .{ .name = "mdv.assign" },
+    .{ .name = "mdv.claim" },
 };
 
 const dev_origins = [_][]const u8{ "zero://app", "zero://inline", "http://127.0.0.1:5173" };
@@ -242,4 +325,32 @@ test "payloadPath extracts plain and escaped paths" {
     try std.testing.expectEqualStrings("/tmp/a b.md", p1);
     const p2 = payloadPath("{\"path\":\"/tmp/q\\\"x\\\\y.md\"}", &buf).?;
     try std.testing.expectEqualStrings("/tmp/q\"x\\y.md", p2);
+}
+
+test "payloadWindowId extracts the windowId field" {
+    try std.testing.expectEqual(@as(?u64, 42), payloadWindowId("{\"windowId\":42,\"path\":\"/tmp/a.md\"}"));
+    try std.testing.expectEqual(@as(?u64, 7), payloadWindowId("{\"path\":\"/tmp/a.md\",\"windowId\": 7}"));
+    try std.testing.expectEqual(@as(?u64, null), payloadWindowId("{\"path\":\"/tmp/a.md\"}"));
+    try std.testing.expectEqual(@as(?u64, null), payloadWindowId("{\"windowId\":\"nope\"}"));
+}
+
+test "assignPath/claimPath: store, overwrite, and full-table behavior" {
+    var table = [_]WindowSlot{.{}} ** 4;
+
+    try std.testing.expect(assignPath(&table, 2, "/tmp/a.md"));
+    try std.testing.expectEqualStrings("/tmp/a.md", claimPath(&table, 2).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), claimPath(&table, 3));
+
+    // overwriting the same window id replaces its path, no new slot used.
+    try std.testing.expect(assignPath(&table, 2, "/tmp/b.md"));
+    try std.testing.expectEqualStrings("/tmp/b.md", claimPath(&table, 2).?);
+
+    try std.testing.expect(assignPath(&table, 3, "/tmp/c.md"));
+    try std.testing.expect(assignPath(&table, 4, "/tmp/d.md"));
+    try std.testing.expect(assignPath(&table, 5, "/tmp/e.md"));
+    // table (4 slots) now holds windows 2,3,4,5 -- no room for a new one.
+    try std.testing.expect(!assignPath(&table, 6, "/tmp/f.md"));
+
+    // window_id 0 is the free-slot sentinel and must never be assignable.
+    try std.testing.expect(!assignPath(&table, 0, "/tmp/g.md"));
 }
