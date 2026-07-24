@@ -10,14 +10,12 @@ A minimal native-sdk desktop app with a web frontend.
 npm install --prefix frontend
 ```
 
-The generated build defaults to this Native SDK framework path:
+The build locates the Native SDK framework in this order:
 
-```text
-../native-sdk
-
-```
-
-Override it with `-Dnative-sdk-path=/path/to/native-sdk` if you move this app.
+1. `-Dnative-sdk-path=/path/to/native-sdk` build option
+2. `NATIVE_SDK_PATH` environment variable
+3. The global npm install (`<npm root -g>/@native-sdk/cli`)
+4. A `../native-sdk` sibling checkout
 
 ## Commands
 

@@ -32,8 +32,22 @@ const PackageTarget = enum {
     linux,
 };
 
-const default_native_sdk_path ="../native-sdk";
+const fallback_native_sdk_path = "../native-sdk";
 const app_exe_name = "mdv";
+
+// Resolution order: -Dnative-sdk-path > NATIVE_SDK_PATH env var >
+// global npm install (`npm root -g`) > ../native-sdk checkout.
+fn defaultNativeSdkPath(b: *std.Build) []const u8 {
+    if (b.graph.environ_map.get("NATIVE_SDK_PATH")) |path| {
+        if (path.len > 0) return path;
+    }
+    var code: u8 = undefined;
+    const npm_out = b.runAllowFail(&.{ "npm", "root", "-g" }, &code, .ignore) catch
+        return fallback_native_sdk_path;
+    const npm_root = std.mem.trim(u8, npm_out, " \t\r\n");
+    if (npm_root.len == 0) return fallback_native_sdk_path;
+    return b.pathJoin(&.{ npm_root, "@native-sdk", "cli" });
+}
 
 pub fn build(b: *std.Build) void {
     const target = nativeSdkTarget(b);
@@ -55,7 +69,7 @@ pub fn build(b: *std.Build) void {
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
-    const native_sdk_path = b.option([]const u8, "native-sdk-path", "Path to the Native SDK framework checkout") orelse default_native_sdk_path;
+    const native_sdk_path = b.option([]const u8, "native-sdk-path", "Path to the Native SDK framework checkout") orelse defaultNativeSdkPath(b);
     const package_optimize_name = @tagName(package_optimize);
     const selected_platform: PlatformOption = switch (platform_option) {
         .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .@"null",
