@@ -84,16 +84,50 @@ async function renderPath(path, { preserveScroll } = { preserveScroll: false }) 
   decorateSections();
   applyCollapse();
 
+  // Re-render just replaced els.content.innerHTML, wiping any highlights --
+  // rebuild them and land as close as possible to the previous position.
+  if (!findEls.bar.hidden && findQuery) {
+    const prevIndex = findIndex;
+    runSearch(findQuery);
+    if (findHits.length > 0) focusMatch(Math.max(0, Math.min(prevIndex, findHits.length - 1)));
+  }
+
   if (preserveScroll) restoreScrollAnchor(anchor);
 }
 
-// Reads path and updates currentMtime as a side effect; throws on error so
+// Reads path in escape-bounded chunks (mdv.read caps a single response at
+// 1 MiB) and updates currentMtime as a side effect; throws on error so
 // callers can treat "unreadable" uniformly.
 async function readableContent(path) {
-  const res = await zero.invoke("mdv.read", { path });
-  if (res.error) throw new Error(res.error);
-  currentMtime = res.mtime;
-  return res.content;
+  let restarts = 0;
+  outer: while (true) {
+    const parts = [];
+    let offset = 0;
+    let mtime = null;
+    while (true) {
+      const res = await zero.invoke("mdv.read", { path, offset });
+      if (res.error) {
+        const err = new Error(res.error);
+        if (res.size != null) err.size = res.size;
+        throw err;
+      }
+      if (mtime === null) {
+        mtime = res.mtime;
+      } else if (res.mtime !== mtime) {
+        // file changed mid-read -- the chunks no longer agree; restart.
+        restarts += 1;
+        if (restarts > 5) throw new Error("unreadable");
+        continue outer;
+      }
+      parts.push(res.content);
+      if (res.eof) {
+        currentMtime = mtime;
+        return parts.join("");
+      }
+      if (!(res.next > offset)) throw new Error("unreadable");
+      offset = res.next;
+    }
+  }
 }
 
 function showDoc(path) {
@@ -102,9 +136,23 @@ function showDoc(path) {
   els.filename.textContent = basename(path);
 }
 
-function showBanner() {
+// A too-large file won't fix itself by waiting, so it gets its own text
+// (with the actual size when the error carries one); every other failure
+// keeps the generic "watching for it to return" message.
+function bannerMessageFor(err) {
+  if (err && err.message === "too_large") {
+    if (err.size != null) {
+      const mb = (err.size / (1024 * 1024)).toFixed(1);
+      return `file is too large to display (${mb} MB; limit 32 MB)`;
+    }
+    return "file is too large to display";
+  }
+  return "file unavailable — watching for it to return";
+}
+
+function showBanner(message) {
   els.banner.hidden = false;
-  els.banner.textContent = "file unavailable — watching for it to return";
+  els.banner.textContent = message;
 }
 
 function hideBanner() {
@@ -116,7 +164,14 @@ async function openInThisWindow(path) {
   try {
     await renderPath(path, { preserveScroll: false });
   } catch (err) {
-    showBanner();
+    showBanner(bannerMessageFor(err));
+    if (err && err.message === "too_large") {
+      // A watcher left over from the previously open file would stat this
+      // one successfully every tick, hideBanner() away the explanation, and
+      // re-fail the render forever. Too-large won't fix itself: stop polling.
+      stopWatching();
+      return;
+    }
     unreadableStreak = 2;
     startWatching();
     return;
@@ -126,6 +181,12 @@ async function openInThisWindow(path) {
   startWatching();
 }
 
+function stopWatching() {
+  if (!statTimer) return;
+  clearInterval(statTimer);
+  statTimer = null;
+}
+
 function startWatching() {
   if (statTimer) return;
   statTimer = setInterval(async () => {
@@ -133,8 +194,9 @@ function startWatching() {
     try {
       const st = await zero.invoke("mdv.stat", { path: currentPath });
       if (st.error) {
+        // mdv.stat only ever reports "unreadable" -- no err.message to select on.
         unreadableStreak += 1;
-        if (unreadableStreak >= 2) showBanner();
+        if (unreadableStreak >= 2) showBanner(bannerMessageFor(null));
         return;
       }
       unreadableStreak = 0;
@@ -144,12 +206,12 @@ function startWatching() {
           await renderPath(currentPath, { preserveScroll: true });
         } catch (err) {
           unreadableStreak += 1;
-          if (unreadableStreak >= 2) showBanner();
+          if (unreadableStreak >= 2) showBanner(bannerMessageFor(err));
         }
       }
     } catch (err) {
       unreadableStreak += 1;
-      if (unreadableStreak >= 2) showBanner();
+      if (unreadableStreak >= 2) showBanner(bannerMessageFor(err));
     }
   }, 500);
 }
@@ -396,6 +458,7 @@ cfgEls.reset.addEventListener("click", () => {
 
 function openSettings() {
   closeToc();
+  closeFind(); // shares the top-right slot, and .find outranks it on z-index
   populateSettings();
   cfgEls.panel.hidden = false;
   requestAnimationFrame(() => cfgEls.panel.classList.add("open"));
@@ -622,6 +685,205 @@ if (typeof zero.on === "function") {
   zero.on("mdv:toc", () => toggleToc());
 }
 
+// ---- find (Cmd+F) ----
+//
+// WKWebView never delivers Cmd-modifier hotkeys to JS keydown, so the menu
+// route (mdv.find / mdv.findNext / mdv.findPrev -> window events) is the
+// only way Cmd+F/G reach here in the packaged app.
+
+const FIND_MAX_HITS = 5000;
+
+const findEls = {
+  bar: document.getElementById("find"),
+  input: document.getElementById("find-input"),
+  count: document.getElementById("find-count"),
+  prev: document.getElementById("find-prev"),
+  next: document.getElementById("find-next"),
+  close: document.getElementById("find-close"),
+};
+
+let findQuery = "";
+let findHits = [];
+let findIndex = -1;
+
+function clearHighlights() {
+  for (const mark of findHits) {
+    const parent = mark.parentNode;
+    if (!parent) continue; // already detached by a re-render
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  }
+  findHits = [];
+  findIndex = -1;
+}
+
+// Splits one matching text node into plain-text + <mark> fragments. Called
+// only after the TreeWalker below has finished -- mutating the DOM mid-walk
+// would derail its traversal.
+function highlightTextNode(textNode, needle) {
+  const text = textNode.nodeValue;
+  const lower = text.toLowerCase();
+  let idx = lower.indexOf(needle);
+  if (idx === -1) return;
+  const frag = document.createDocumentFragment();
+  let cursor = 0;
+  while (idx !== -1) {
+    if (findHits.length >= FIND_MAX_HITS) break;
+    if (idx > cursor) frag.appendChild(document.createTextNode(text.slice(cursor, idx)));
+    const mark = document.createElement("mark");
+    mark.className = "find-hit";
+    mark.textContent = text.slice(idx, idx + needle.length);
+    frag.appendChild(mark);
+    findHits.push(mark);
+    cursor = idx + needle.length;
+    idx = lower.indexOf(needle, cursor);
+  }
+  if (cursor < text.length) frag.appendChild(document.createTextNode(text.slice(cursor)));
+  textNode.parentNode.replaceChild(frag, textNode);
+}
+
+function highlightIn(root, needle) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      // Chevron button labels and the hidden mermaid source aren't real
+      // document text -- matching them would highlight UI chrome.
+      const parent = node.parentElement;
+      if (parent && parent.closest(".sec-toggle, .mermaid-source")) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  let node;
+  while ((node = walker.nextNode())) nodes.push(node);
+  for (const textNode of nodes) {
+    if (findHits.length >= FIND_MAX_HITS) break;
+    highlightTextNode(textNode, needle);
+  }
+}
+
+function updateFindCount() {
+  if (!findQuery) {
+    findEls.count.textContent = "";
+  } else if (findHits.length === 0) {
+    findEls.count.textContent = "no matches";
+  } else {
+    const total = findHits.length >= FIND_MAX_HITS ? `${FIND_MAX_HITS}+` : String(findHits.length);
+    findEls.count.textContent = `${findIndex + 1} / ${total}`;
+  }
+}
+
+function runSearch(query) {
+  clearHighlights();
+  findQuery = query;
+  if (query) {
+    const needle = query.toLowerCase();
+    highlightIn(els.frontmatter, needle);
+    highlightIn(els.content, needle);
+  }
+  updateFindCount();
+}
+
+// Un-hides whichever collapsed section(s) currently hide `mark`, walking
+// outward from its top-level container in els.content. Bounded so a DOM
+// surprise (e.g. a cycle) can't hang the app.
+function revealMatch(mark) {
+  if (!els.content.contains(mark)) return;
+  let top = mark;
+  while (top.parentElement !== els.content) top = top.parentElement;
+  let guard = 0;
+  while (top.classList.contains("sec-hidden") && guard < 8) {
+    guard += 1;
+    let hider = top.previousElementSibling;
+    while (hider && !(hider.classList.contains("collapsed") && !hider.classList.contains("sec-hidden"))) {
+      hider = hider.previousElementSibling;
+    }
+    if (!hider) break;
+    collapsedSections.delete(hider.id);
+    applyCollapse();
+  }
+}
+
+function focusMatch(i) {
+  const n = findHits.length;
+  if (n === 0) {
+    findIndex = -1;
+    updateFindCount();
+    return;
+  }
+  findIndex = ((i % n) + n) % n;
+  for (const mark of findHits) mark.classList.remove("current");
+  const mark = findHits[findIndex];
+  revealMatch(mark);
+  mark.classList.add("current");
+  mark.scrollIntoView({ block: "center" });
+  updateFindCount();
+}
+
+function findNext() {
+  if (findHits.length > 0) focusMatch(findIndex + 1);
+}
+
+function findPrev() {
+  if (findHits.length > 0) focusMatch(findIndex - 1);
+}
+
+function openFind() {
+  closeToc();
+  closeSettings();
+  findEls.bar.hidden = false;
+  findEls.input.focus();
+  findEls.input.select();
+  if (findQuery) {
+    runSearch(findQuery);
+    if (findHits.length > 0) focusMatch(0);
+  }
+}
+
+function closeFind() {
+  clearHighlights();
+  findEls.bar.hidden = true;
+  findQuery = "";
+  findEls.input.value = "";
+  updateFindCount();
+}
+
+function toggleFind() {
+  if (findEls.bar.hidden) openFind();
+  else closeFind();
+}
+
+findEls.input.addEventListener("input", () => {
+  runSearch(findEls.input.value);
+  if (findHits.length > 0) focusMatch(0);
+});
+
+findEls.input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (e.shiftKey) findPrev();
+    else findNext();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeFind();
+  }
+});
+
+findEls.prev.addEventListener("click", () => findPrev());
+findEls.next.addEventListener("click", () => findNext());
+findEls.close.addEventListener("click", () => closeFind());
+
+if (typeof zero.on === "function") {
+  zero.on("mdv:find", () => toggleFind());
+  zero.on("mdv:findNext", () => {
+    if (findEls.bar.hidden && findQuery) openFind();
+    findNext();
+  });
+  zero.on("mdv:findPrev", () => {
+    if (findEls.bar.hidden && findQuery) openFind();
+    findPrev();
+  });
+}
+
 // ---- open dialog ----
 
 async function openViaDialog() {
@@ -642,6 +904,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeToc();
     closeSettings();
+    closeFind();
     return;
   }
   const mod = e.metaKey || e.ctrlKey;
@@ -650,6 +913,18 @@ document.addEventListener("keydown", (e) => {
   if (key === ",") {
     e.preventDefault();
     toggleSettings();
+  } else if (key === "f") {
+    // Dead in the packaged app (WKWebView swallows Cmd-modifier keys -- the
+    // app.zon menu carries it there), but it makes Cmd+F work in browser dev
+    // mode and stops the browser's own find bar hijacking a document viewer.
+    e.preventDefault();
+    toggleFind();
+  } else if (key === "g" && e.shiftKey) {
+    e.preventDefault();
+    findPrev();
+  } else if (key === "g") {
+    e.preventDefault();
+    findNext();
   } else if (key === "o" && e.shiftKey) {
     e.preventDefault();
     toggleToc();

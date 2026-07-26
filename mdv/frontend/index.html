@@ -9,6 +9,13 @@
   <body>
     <div id="app">
       <div id="banner" class="banner" hidden></div>
+      <div id="find" class="find" hidden>
+        <input type="text" id="find-input" placeholder="Find" autocomplete="off" spellcheck="false" />
+        <span id="find-count" class="find-count"></span>
+        <button type="button" id="find-prev" class="find-btn" aria-label="Previous match">&#8593;</button>
+        <button type="button" id="find-next" class="find-btn" aria-label="Next match">&#8595;</button>
+        <button type="button" id="find-close" class="find-btn" aria-label="Close find">&#215;</button>
+      </div>
       <div id="doc" hidden>
         <div id="filename" class="filename"></div>
         <div id="frontmatter"></div>

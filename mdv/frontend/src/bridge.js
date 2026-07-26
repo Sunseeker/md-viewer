@@ -45,7 +45,21 @@ function installMockZero() {
         case "mdv.read": {
           try {
             const content = await readMockFixture();
-            return { mtime: MOCK_MTIME, content };
+            const offset = (payload && payload.offset) || 0;
+            // Far smaller than the real 256 KB, and deliberately smaller than
+            // dev-fixture.md (~1.1 KB): at any chunk size above the fixture
+            // the mock returns everything in one shot and `npm run dev` never
+            // exercises the reassembly loop at all.
+            const MOCK_CHUNK = 256;
+            const next = Math.min(offset + MOCK_CHUNK, content.length);
+            return {
+              mtime: MOCK_MTIME,
+              size: content.length,
+              offset,
+              content: content.slice(offset, next),
+              next,
+              eof: next >= content.length,
+            };
           } catch (err) {
             return { error: "unreadable" };
           }

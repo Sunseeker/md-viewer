@@ -528,6 +528,78 @@ body {
   border-color: var(--muted);
 }
 
+/* ---- find bar ---- */
+
+/* Same fixed top-right slot as .settings (top:16/right:16) -- openFind()
+   always closes settings/TOC first, so the two never actually overlap.
+   It sits above the TOC rail (top:72) without extra offsetting. */
+
+.find {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+  padding: 6px 8px;
+  z-index: 12;
+}
+
+.find input {
+  width: 180px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+  outline: none;
+}
+
+.find input:focus {
+  border-color: var(--link);
+}
+
+.find-count {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 52px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.find-btn {
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--fg);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.find-btn:hover {
+  border-color: var(--muted);
+}
+
+mark.find-hit {
+  background: color-mix(in srgb, var(--link) 25%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+
+mark.find-hit.current {
+  background: var(--link);
+  color: var(--bg);
+}
+
 /* TOC active item */
 
 .toc-item.active {

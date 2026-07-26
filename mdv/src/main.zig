@@ -8,8 +8,12 @@ pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 extern fn mdv_take_pending(buf: [*]u8, cap: c_long) c_long;
 extern fn mdv_shim_status() c_int;
 
-const max_file_bytes = 400 * 1024;
-var file_buf: [max_file_bytes]u8 = undefined;
+// One bridge response is capped at 1 MiB by the SDK, so files are served
+// in escape-bounded chunks that the frontend concatenates. The ceiling
+// below is a sanity bound on total document size, not a transport limit.
+const read_chunk_bytes = 256 * 1024;
+const max_file_bytes = 32 * 1024 * 1024;
+var file_buf: [read_chunk_bytes]u8 = undefined;
 var bridge_ctx: u8 = 0;
 var g_io: std.Io = undefined;
 var home_buf: [1024]u8 = undefined;
@@ -38,6 +42,12 @@ const App = struct {
                     rt.emitWindowEvent(wid, "mdv:settings", "{}") catch {};
                 } else if (std.mem.eql(u8, cmd.name, "mdv.toc")) {
                     rt.emitWindowEvent(wid, "mdv:toc", "{}") catch {};
+                } else if (std.mem.eql(u8, cmd.name, "mdv.find")) {
+                    rt.emitWindowEvent(wid, "mdv:find", "{}") catch {};
+                } else if (std.mem.eql(u8, cmd.name, "mdv.findNext")) {
+                    rt.emitWindowEvent(wid, "mdv:findNext", "{}") catch {};
+                } else if (std.mem.eql(u8, cmd.name, "mdv.findPrev")) {
+                    rt.emitWindowEvent(wid, "mdv:findPrev", "{}") catch {};
                 }
             },
             else => {},
@@ -71,9 +81,18 @@ const JsonOut = struct {
         self.i += 1;
     }
 
-    fn str(self: *JsonOut, s: []const u8) !void {
+    // Writes as much of `s` as fits, leaving `reserve` bytes for the caller's
+    // trailing JSON, and returns how many source bytes were consumed. Escape
+    // sequences are never split across a chunk boundary.
+    fn strChunk(self: *JsonOut, s: []const u8, reserve: usize) !usize {
         try self.byte('"');
+        var consumed: usize = 0;
         for (s) |c| {
+            const enc_len: usize = switch (c) {
+                '"', '\\', '\n', '\r', '\t' => 2,
+                else => if (c < 0x20) 6 else 1,
+            };
+            if (self.i + enc_len + 1 + reserve > self.out.len) break;
             switch (c) {
                 '"' => try self.raw("\\\""),
                 '\\' => try self.raw("\\\\"),
@@ -90,8 +109,27 @@ const JsonOut = struct {
                     }
                 },
             }
+            consumed += 1;
+        }
+        // Never end a chunk mid UTF-8 sequence. The macOS host builds the
+        // reply with NSString initWithBytes:NSUTF8StringEncoding, which
+        // returns nil on invalid UTF-8 and degrades the WHOLE response to
+        // "{}" -- the file would then fail to open, intermittently, only on
+        // documents with non-ASCII text. Continuation bytes are written 1:1,
+        // so rewinding input and output together is exact.
+        if (consumed < s.len) {
+            while (consumed > 0 and (s[consumed] & 0xC0) == 0x80) {
+                consumed -= 1;
+                self.i -= 1;
+            }
         }
         try self.byte('"');
+        return consumed;
+    }
+
+    fn str(self: *JsonOut, s: []const u8) !void {
+        const n = try self.strChunk(s, 0);
+        if (n != s.len) return error.NoSpaceLeft;
     }
 
     fn int(self: *JsonOut, v: i64) !void {
@@ -151,9 +189,9 @@ fn mtimeMs(ts: std.Io.Timestamp) i64 {
     return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
 }
 
-// Extracts payload.windowId (JSON number, integer digits only) from payload.
-fn payloadWindowId(payload: []const u8) ?u64 {
-    const key = "\"windowId\"";
+// Extracts payload[key] (JSON number, integer digits only). `key` must
+// include its surrounding quotes, e.g. "\"windowId\"".
+fn payloadNumber(payload: []const u8, key: []const u8) ?u64 {
     const ki = std.mem.indexOf(u8, payload, key) orelse return null;
     var i = ki + key.len;
     while (i < payload.len and (payload[i] == ' ' or payload[i] == ':')) i += 1;
@@ -252,6 +290,7 @@ fn hStat(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]
 fn hRead(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]const u8 {
     var path_buf: [4096]u8 = undefined;
     const path = payloadPath(invocation.request.payload, &path_buf) orelse return error.BadPath;
+    const offset = payloadNumber(invocation.request.payload, "\"offset\"") orelse 0;
     var w = JsonOut{ .out = output };
     var f = std.Io.Dir.cwd().openFile(g_io, path, .{}) catch {
         try w.raw("{\"error\":\"unreadable\"}");
@@ -268,14 +307,29 @@ fn hRead(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]
         try w.raw("}");
         return output[0..w.i];
     }
-    const n = f.readPositionalAll(g_io, &file_buf, 0) catch {
+    const size = st.size;
+    // offset past EOF (or an already-complete file) reads as an empty, EOF chunk.
+    const want: usize = if (offset >= size) 0 else @intCast(@min(@as(u64, read_chunk_bytes), size - offset));
+    const n: usize = if (want == 0) 0 else f.readPositionalAll(g_io, file_buf[0..want], offset) catch {
         try w.raw("{\"error\":\"unreadable\"}");
         return output[0..w.i];
     };
     try w.raw("{\"mtime\":");
     try w.int(mtimeMs(st.mtime));
+    try w.raw(",\"size\":");
+    try w.int(@intCast(size));
+    try w.raw(",\"offset\":");
+    try w.int(@intCast(offset));
     try w.raw(",\"content\":");
-    try w.str(file_buf[0..n]);
+    // content must come before next/eof: the consumed count (and therefore
+    // next) is only known once the chunk has actually been written.
+    const consumed = try w.strChunk(file_buf[0..n], 64);
+    if (consumed == 0 and n > 0) return error.NoSpaceLeft;
+    const next = offset + consumed;
+    try w.raw(",\"next\":");
+    try w.int(@intCast(next));
+    try w.raw(",\"eof\":");
+    try w.raw(if (next >= size) "true" else "false");
     try w.raw("}");
     return output[0..w.i];
 }
@@ -283,7 +337,7 @@ fn hRead(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]
 fn hAssign(_: *anyopaque, invocation: bridge.Invocation, output: []u8) anyerror![]const u8 {
     var path_buf: [4096]u8 = undefined;
     const path = payloadPath(invocation.request.payload, &path_buf) orelse return error.BadPath;
-    const window_id = payloadWindowId(invocation.request.payload) orelse return error.BadWindowId;
+    const window_id = payloadNumber(invocation.request.payload, "\"windowId\"") orelse return error.BadWindowId;
     var w = JsonOut{ .out = output };
     if (assignPath(&window_paths, window_id, path)) {
         try w.raw("{\"ok\":true}");
@@ -446,11 +500,71 @@ test "payloadPath extracts plain and escaped paths" {
     try std.testing.expectEqualStrings("/tmp/q\"x\\y.md", p2);
 }
 
-test "payloadWindowId extracts the windowId field" {
-    try std.testing.expectEqual(@as(?u64, 42), payloadWindowId("{\"windowId\":42,\"path\":\"/tmp/a.md\"}"));
-    try std.testing.expectEqual(@as(?u64, 7), payloadWindowId("{\"path\":\"/tmp/a.md\",\"windowId\": 7}"));
-    try std.testing.expectEqual(@as(?u64, null), payloadWindowId("{\"path\":\"/tmp/a.md\"}"));
-    try std.testing.expectEqual(@as(?u64, null), payloadWindowId("{\"windowId\":\"nope\"}"));
+test "payloadNumber extracts a keyed integer field" {
+    try std.testing.expectEqual(@as(?u64, 42), payloadNumber("{\"windowId\":42,\"path\":\"/tmp/a.md\"}", "\"windowId\""));
+    try std.testing.expectEqual(@as(?u64, 7), payloadNumber("{\"path\":\"/tmp/a.md\",\"windowId\": 7}", "\"windowId\""));
+    try std.testing.expectEqual(@as(?u64, null), payloadNumber("{\"path\":\"/tmp/a.md\"}", "\"windowId\""));
+    try std.testing.expectEqual(@as(?u64, null), payloadNumber("{\"windowId\":\"nope\"}", "\"windowId\""));
+}
+
+test "strChunk stops short, reports consumed bytes, and never splits an escape" {
+    // out.len=10, reserve=5: only 3 of the 5 plain-ascii input bytes fit
+    // before the reserve floor is hit.
+    var buf: [10]u8 = undefined;
+    var w = JsonOut{ .out = &buf };
+    const n = try w.strChunk("abcde", 5);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualStrings("\"abc\"", buf[0..w.i]);
+
+    // out.len=6, reserve=1: the 3rd char is a 2-byte "\n" escape that does
+    // not fit whole, so it is excluded entirely -- never a lone backslash.
+    var buf2: [6]u8 = undefined;
+    var w2 = JsonOut{ .out = &buf2 };
+    const n2 = try w2.strChunk("ab\ncd", 1);
+    try std.testing.expectEqual(@as(usize, 2), n2);
+    try std.testing.expectEqualStrings("\"ab\"", buf2[0..w2.i]);
+
+    // out.len=8, reserve=1: the same "\n" now fits whole and is included in
+    // full, proving the escape is written atomically either way.
+    var buf3: [8]u8 = undefined;
+    var w3 = JsonOut{ .out = &buf3 };
+    const n3 = try w3.strChunk("ab\ncd", 1);
+    try std.testing.expectEqual(@as(usize, 4), n3);
+    try std.testing.expectEqualStrings("\"ab\\nc\"", buf3[0..w3.i]);
+}
+
+test "strChunk never ends a chunk mid UTF-8 sequence" {
+    // "e" + U+00E9 (2 bytes) + "f". A cut that would land between the two
+    // bytes of the multi-byte char must rewind to before it: a lone lead or
+    // continuation byte makes the host's NSString decode fail and drops the
+    // entire bridge response.
+    const src = "e\u{00e9}f";
+    try std.testing.expectEqual(@as(usize, 4), src.len);
+
+    // Room for the quotes plus exactly 2 payload bytes -- that boundary falls
+    // inside the 2-byte character, so only the leading "e" may be emitted.
+    var buf: [4]u8 = undefined;
+    var w = JsonOut{ .out = &buf };
+    const n = try w.strChunk(src, 0);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqualStrings("\"e\"", buf[0..w.i]);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(buf[1 .. w.i - 1]));
+
+    // One more byte of room fits the whole character, so it is emitted whole.
+    var buf2: [5]u8 = undefined;
+    var w2 = JsonOut{ .out = &buf2 };
+    const n2 = try w2.strChunk(src, 0);
+    try std.testing.expectEqual(@as(usize, 3), n2);
+    try std.testing.expectEqualStrings("\"e\u{00e9}\"", buf2[0..w2.i]);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(buf2[1 .. w2.i - 1]));
+
+    // A complete string is never rewound, even when it ends on a multi-byte
+    // character and fits exactly.
+    var buf3: [8]u8 = undefined;
+    var w3 = JsonOut{ .out = &buf3 };
+    const n3 = try w3.strChunk("a\u{00e9}", 0);
+    try std.testing.expectEqual(@as(usize, 3), n3);
+    try std.testing.expectEqualStrings("\"a\u{00e9}\"", buf3[0..w3.i]);
 }
 
 test "assignPath/claimPath: store, overwrite, and full-table behavior" {

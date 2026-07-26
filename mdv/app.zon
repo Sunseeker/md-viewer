@@ -22,6 +22,9 @@
     .commands = .{
         .{ .id = "mdv.settings", .title = "Appearance Settings" },
         .{ .id = "mdv.toc", .title = "Table of Contents" },
+        .{ .id = "mdv.find", .title = "Find" },
+        .{ .id = "mdv.findNext", .title = "Find Next" },
+        .{ .id = "mdv.findPrev", .title = "Find Previous" },
     },
     .menus = .{
         .{
@@ -29,6 +32,14 @@
             .items = .{
                 .{ .label = "Appearance...", .command = "mdv.settings", .key = ",", .modifiers = .{"command"} },
                 .{ .label = "Table of Contents", .command = "mdv.toc", .key = "o", .modifiers = .{ "command", "shift" } },
+            },
+        },
+        .{
+            .title = "Find",
+            .items = .{
+                .{ .label = "Find...", .command = "mdv.find", .key = "f", .modifiers = .{"command"} },
+                .{ .label = "Find Next", .command = "mdv.findNext", .key = "g", .modifiers = .{"command"} },
+                .{ .label = "Find Previous", .command = "mdv.findPrev", .key = "g", .modifiers = .{ "command", "shift" } },
             },
         },
     },
