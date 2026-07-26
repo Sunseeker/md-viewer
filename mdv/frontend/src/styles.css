@@ -20,6 +20,9 @@
   --banner-border: rgba(107, 83, 0, 0.25);
   --link: #1a5fb4;
   --shadow: rgba(20, 20, 18, 0.14);
+  /* Resting TOC minimap bars. Kept off --border: these are 2px-tall
+     standalone marks, not edges, so they need real contrast to register. */
+  --toc-bar: rgba(20, 20, 18, 0.12);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -35,6 +38,10 @@
     --banner-border: rgba(230, 207, 122, 0.25);
     --link: #7ab0f0;
     --shadow: rgba(0, 0, 0, 0.4);
+    /* At --border's 0.14 the bars measured 1.43:1 against --bg and read as
+       invisible on a real display. 0.40 lands ~3:1, the non-text UI floor,
+       while staying below --muted (5.5:1) so hover is still a clear change. */
+    --toc-bar: rgba(217, 218, 222, 0.4);
   }
 }
 
@@ -355,7 +362,7 @@ body {
 .toc-bar {
   height: 2px;
   border-radius: 1px;
-  background: var(--border);
+  background: var(--toc-bar);
   transition: background 120ms ease;
 }
 
