@@ -21,8 +21,11 @@
   --link: #1a5fb4;
   --shadow: rgba(20, 20, 18, 0.14);
   /* Resting TOC minimap bars. Kept off --border: these are 2px-tall
-     standalone marks, not edges, so they need real contrast to register. */
-  --toc-bar: rgba(20, 20, 18, 0.12);
+     standalone marks, not edges, so they need real contrast to register.
+     0.45 measures ~3:1 against --bg, the non-text UI floor. Light needs
+     more alpha than dark for the same ratio -- ink on a near-white ground
+     climbs the luminance curve far more slowly. */
+  --toc-bar: rgba(20, 20, 18, 0.45);
 }
 
 @media (prefers-color-scheme: dark) {
