@@ -1,12 +1,21 @@
-// mdv open-files shim.
+// mdv open-files + edit-menu shim.
 //
-// The Native SDK's NativeSdkAppDelegate (0.4.4 and 0.5.4) implements no
-// application:openFiles:, so Finder's odoc Apple Event is dropped and
-// double-clicked documents never reach the app. This file injects the
-// missing delegate method at runtime and queues the delivered paths for
-// the Zig core to drain over the JS bridge.
+// Open files: the Native SDK's NativeSdkAppDelegate (0.4.4 and 0.5.4)
+// implements no application:openFiles:, so Finder's odoc Apple Event is
+// dropped and double-clicked documents never reach the app. This file
+// injects the missing delegate method at runtime and queues the delivered
+// paths for the Zig core to drain over the JS bridge.
 //
-// Remove once the SDK delivers open-file events itself.
+// Edit menu: when app.zon declares custom .menus, the SDK's
+// setMenusWithTitles builds ONLY the app menu plus those custom menus,
+// dropping the default File/Edit/View/Window set -- so Cmd+C had no key
+// equivalent anywhere in the menu bar and just beeped. mdv_install_edit_menu
+// re-inserts a standard Edit menu (nil-target selectors ride the responder
+// chain into the WKWebView). Menus are configured once at runtime startup
+// (runtime/flow.zig configureMenus), never re-set, so a one-time insert
+// after didFinishLaunching sticks.
+//
+// Remove once the SDK delivers open-file events / merges default menus itself.
 
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
@@ -87,10 +96,56 @@ static MdvAppDelegate *mdv_delegate; // NSApp.delegate is unretained; keep it al
 }
 @end
 
+static NSMenuItem *mdv_edit_item(NSString *title, SEL action, NSString *key, NSEventModifierFlags mods) {
+    // nil target: the action resolves through the responder chain, which
+    // is what routes copy:/selectAll: into the focused WKWebView.
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    item.keyEquivalentModifierMask = mods;
+    return item;
+}
+
+static void mdv_install_edit_menu(void) {
+    NSMenu *mainMenu = [NSApp mainMenu];
+    if (!mainMenu) {
+        mdv_debug_log(@"edit menu: no main menu yet, skipped");
+        return;
+    }
+    for (NSMenuItem *top in mainMenu.itemArray) {
+        if ([top.title isEqualToString:@"Edit"]) return; // SDK grew one back
+    }
+    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    editItem.submenu = editMenu;
+    [editMenu addItem:mdv_edit_item(@"Undo", @selector(undo:), @"z", NSEventModifierFlagCommand)];
+    [editMenu addItem:mdv_edit_item(@"Redo", @selector(redo:), @"Z", NSEventModifierFlagCommand)];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItem:mdv_edit_item(@"Cut", @selector(cut:), @"x", NSEventModifierFlagCommand)];
+    [editMenu addItem:mdv_edit_item(@"Copy", @selector(copy:), @"c", NSEventModifierFlagCommand)];
+    [editMenu addItem:mdv_edit_item(@"Paste", @selector(paste:), @"v", NSEventModifierFlagCommand)];
+    [editMenu addItem:mdv_edit_item(@"Select All", @selector(selectAll:), @"a", NSEventModifierFlagCommand)];
+    // After the bold app menu (index 0), before the custom manifest menus.
+    [mainMenu insertItem:editItem atIndex:MIN(1, mainMenu.numberOfItems)];
+    mdv_debug_log(@"edit menu installed");
+}
+
 __attribute__((constructor)) static void mdv_install(void) {
     mdv_queue = [NSMutableArray new];
     mdv_lock = [NSLock new];
     mdv_debug_log(@"shim constructor");
+
+    // Edit menu goes in after launch: the SDK sets manifest menus once
+    // before the run loop starts, so didFinishLaunching + a main-queue hop
+    // is guaranteed to run after them and never get overwritten.
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSApplicationDidFinishLaunchingNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification *note) {
+                    (void)note;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        mdv_install_edit_menu();
+                    });
+                }];
 
     // macOS delivers the cold-launch odoc between will/didFinishLaunching,
     // so open-file handling must be wired at willFinishLaunching or earlier.
