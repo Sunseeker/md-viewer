@@ -174,6 +174,20 @@ body {
   margin: 1em 0;
 }
 
+/* Code fences carry data-line on this wrapper, not on <pre> itself: <pre>
+   keeps overflow-x:auto for horizontal scroll, and an element that clips
+   its own overflow also clips a ::before positioned outside its box (the
+   gutter number would exist but never be visible). The wrapper has no
+   padding/border of its own, so it's the same size as the <pre> inside it
+   -- .content pre's margin would double up here, hence margin:0 below. */
+.content .code-block {
+  margin: 1em 0;
+}
+
+.content .code-block pre {
+  margin: 0;
+}
+
 .content pre code {
   background: transparent;
   padding: 0;
@@ -194,9 +208,14 @@ body {
 
 /* ---- tables ---- */
 
+/* .table-wrap carries data-line (same clipping reason as .code-block
+   above) and must not scroll itself; the inner .table-scroll does that. */
 .content .table-wrap {
-  overflow-x: auto;
   margin: 1em 0;
+}
+
+.content .table-scroll {
+  overflow-x: auto;
 }
 
 .content table {
@@ -505,6 +524,26 @@ body {
   border-color: var(--link);
 }
 
+.settings-row-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-row-checkbox input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+.settings-row-checkbox span {
+  display: inline;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 13px;
+  color: var(--fg);
+  margin-bottom: 0;
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -660,4 +699,85 @@ mark.find-hit.current {
 
 .collapsed {
   color: var(--muted);
+}
+
+/* ---- line numbers (gutter) ---- */
+
+/* Source line for the block, stamped by md.js from markdown-it's
+   token.map, on every element with a source range -- unconditionally,
+   regardless of the Settings > Line numbers toggle below, so go-to-line
+   always has a target to search. Shown for top-level blocks and list
+   items; other data-line carriers (nested paragraphs, bullet/ordered list
+   wrappers) stay position:relative only, so there's no duplicate gutter
+   mark stacked on top of the first list item's own number. */
+
+.content > [data-line] {
+  position: relative;
+}
+
+.content li[data-line] {
+  position: relative;
+}
+
+/* The mark itself (content: attr(data-line)) is gated on
+   body:not(.no-line-numbers) -- toggled by the Settings > Line numbers
+   checkbox (default on). Turning it off only hides the ::before; the
+   data-line/data-line-end attributes above stay put either way. */
+body:not(.no-line-numbers) .content > [data-line]:not(ul):not(ol)::before,
+body:not(.no-line-numbers) .content li[data-line]::before {
+  content: attr(data-line);
+  position: absolute;
+  top: 0.15em;
+  width: 40px;
+  text-align: right;
+  color: var(--muted);
+  font-family: var(--mdv-font-mono, var(--font-mono));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums lining-nums;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: none;
+}
+
+body:not(.no-line-numbers) .content > [data-line]:not(ul):not(ol)::before {
+  /* Clears .sec-toggle's -24px..-6px zone on headings with room to spare. */
+  left: -74px;
+}
+
+body:not(.no-line-numbers) .content li[data-line]::before {
+  /* li sits one list padding-left (1.4em) further right than its list's
+     own left edge, so the gutter needs the same extra offset to line up
+     with everything else in the column. Each nesting level adds another
+     1.4em; depth 2 and 3 are compensated below, deeper is rare enough
+     to leave drifting. */
+  left: calc(-74px - 1.4em);
+}
+
+body:not(.no-line-numbers) .content li li[data-line]::before {
+  left: calc(-74px - 2.8em);
+}
+
+body:not(.no-line-numbers) .content li li li[data-line]::before {
+  left: calc(-74px - 4.2em);
+}
+
+/* ---- go to line (Cmd+L) ---- */
+
+/* box-shadow, not background-color: dark mode forces
+   ".content pre.shiki, .content pre.shiki span" background-color to
+   var(--shiki-dark-bg) with !important (above), which would silently
+   swallow a background-color flash on a code line. Inset box-shadow is a
+   different property, so it paints regardless. */
+@keyframes mdv-line-flash {
+  from {
+    box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--link) 25%, transparent);
+  }
+  to {
+    box-shadow: inset 0 0 0 999px transparent;
+  }
+}
+
+.line-flash {
+  animation: mdv-line-flash 1.6s ease-out;
+  border-radius: 4px;
 }

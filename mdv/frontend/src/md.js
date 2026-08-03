@@ -46,6 +46,18 @@ export function escapeHtml(s) {
   })[c]);
 }
 
+// Reads the data-line / data-line-end attrs a custom render rule's token
+// carries (stamped by the mdv_line_map core rule below) and renders them
+// as HTML attributes on the root element that rule returns. Custom render
+// rules bypass markdown-it's default attr renderer, so they have to splice
+// these back in by hand.
+function lineAttrsHtml(token) {
+  const line = token.attrGet("data-line");
+  if (line == null) return "";
+  const lineEnd = token.attrGet("data-line-end");
+  return ` data-line="${line}"${lineEnd != null ? ` data-line-end="${lineEnd}"` : ""}`;
+}
+
 // ---- markdown-it instance ----
 
 let mdInstance = null;
@@ -56,33 +68,61 @@ function getMarkdownIt() {
   md.use(markdownItAnchor);
   md.use(markdownItTaskLists);
 
+  // Stamps every block token that carries a source-line range (token.map)
+  // with data-line / data-line-end, 1-based and shifted by env.lineOffset
+  // (the number of source lines the stripped frontmatter block consumed).
+  // token.map is [startLine, endLine) 0-based, so 1-based start is
+  // map[0]+1 and 1-based inclusive end is map[1] -- both offset the same
+  // way. Runs after the "block" core rule has built state.tokens, so every
+  // renderer rule (default or custom) sees the attrs already set.
+  md.core.ruler.push("mdv_line_map", (state) => {
+    const offset = (state.env && state.env.lineOffset) || 0;
+    for (const token of state.tokens) {
+      if (!token.map) continue;
+      token.attrSet("data-line", String(token.map[0] + 1 + offset));
+      token.attrSet("data-line-end", String(token.map[1] + offset));
+    }
+  });
+
   md.renderer.rules.fence = (tokens, idx) => {
     const token = tokens[idx];
     const rawInfo = token.info ? token.info.trim() : "";
     const langToken = rawInfo.split(/\s+/)[0] || "";
     const code = token.content;
     const escaped = escapeHtml(code);
+    const lineAttrs = lineAttrsHtml(token);
 
     if (langToken.toLowerCase() === "mermaid") {
-      return `<div class="mermaid-block"><pre class="mermaid-source" hidden>${escaped}</pre><div class="mermaid-render">Rendering diagram…</div></div>\n`;
+      // data-line goes on the wrapper (the element actually reachable as a
+      // direct child of #content), not the hidden source <pre> -- mirrors
+      // the table_open wrapper below.
+      return `<div class="mermaid-block"${lineAttrs}><pre class="mermaid-source" hidden>${escaped}</pre><div class="mermaid-render">Rendering diagram…</div></div>\n`;
     }
 
+    // data-line lives on .code-block, not on the <pre> itself: <pre> keeps
+    // overflow-x:auto for horizontal scroll, and a scrolling element clips
+    // its own descendants (including a ::before positioned outside its box
+    // via a negative left offset) -- the gutter number would render but
+    // never be visible. The non-scrolling wrapper is the attribute host.
     const lang = normalizeLang(langToken);
     if (lang) {
-      return `<pre class="shiki-pending" data-lang="${lang}"><code>${escaped}</code></pre>\n`;
+      return `<div class="code-block"${lineAttrs}><pre class="shiki-pending" data-lang="${lang}"><code>${escaped}</code></pre></div>\n`;
     }
-    return `<pre><code>${escaped}</code></pre>\n`;
+    return `<div class="code-block"${lineAttrs}><pre><code>${escaped}</code></pre></div>\n`;
   };
 
-  md.renderer.rules.table_open = () => '<div class="table-wrap"><table>\n';
-  md.renderer.rules.table_close = () => "</table></div>\n";
+  // Same clipping reason as the code-block wrapper above: .table-wrap
+  // carries data-line and must not scroll itself, so the horizontal
+  // scroll lives on the inner .table-scroll instead.
+  md.renderer.rules.table_open = (tokens, idx) => `<div class="table-wrap"${lineAttrsHtml(tokens[idx])}><div class="table-scroll"><table>\n`;
+  md.renderer.rules.table_close = () => "</table></div></div>\n";
 
   mdInstance = md;
   return md;
 }
 
-export function renderMarkdownBody(body) {
-  return getMarkdownIt().render(body);
+export function renderMarkdownBody(body, lineOffset = 0) {
+  return getMarkdownIt().render(body, { lineOffset });
 }
 
 // ---- frontmatter ----
@@ -91,15 +131,19 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/;
 
 export function splitFrontmatter(raw) {
   const match = raw.match(FRONTMATTER_RE);
-  if (!match) return { raw: null, body: raw, data: null, error: null };
+  if (!match) return { raw: null, body: raw, data: null, error: null, lineOffset: 0 };
   const yamlText = match[1];
   const body = raw.slice(match[0].length);
+  // Lines fully consumed by the matched frontmatter block (opening ---
+  // through the newline after the closing ---), so body's own line 1 maps
+  // back to lineOffset + 1 in the original file.
+  const lineOffset = (match[0].match(/\n/g) || []).length;
   try {
     const data = loadYaml(yamlText);
     const isObj = data != null && typeof data === "object" && !Array.isArray(data);
-    return { raw: yamlText, body, data: isObj ? data : null, error: null };
+    return { raw: yamlText, body, data: isObj ? data : null, error: null, lineOffset };
   } catch (err) {
-    return { raw: yamlText, body, data: null, error: (err && err.message) || String(err) };
+    return { raw: yamlText, body, data: null, error: (err && err.message) || String(err), lineOffset };
   }
 }
 
@@ -182,6 +226,9 @@ export async function upgradeCodeBlocks(container) {
       const wrapper = document.createElement("div");
       wrapper.innerHTML = html;
       const rendered = wrapper.firstElementChild;
+      // data-line / data-line-end live on the surrounding .code-block, not
+      // this <pre>, so replacing it in place is all that's needed -- no
+      // attributes to carry over.
       if (rendered) el.replaceWith(rendered);
     } catch (err) {
       el.classList.remove("shiki-pending");

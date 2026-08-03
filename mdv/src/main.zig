@@ -48,6 +48,8 @@ const App = struct {
                     rt.emitWindowEvent(wid, "mdv:findNext", "{}") catch {};
                 } else if (std.mem.eql(u8, cmd.name, "mdv.findPrev")) {
                     rt.emitWindowEvent(wid, "mdv:findPrev", "{}") catch {};
+                } else if (std.mem.eql(u8, cmd.name, "mdv.goto")) {
+                    rt.emitWindowEvent(wid, "mdv:goto", "{}") catch {};
                 }
             },
             else => {},

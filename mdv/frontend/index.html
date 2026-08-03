@@ -16,6 +16,10 @@
         <button type="button" id="find-next" class="find-btn" aria-label="Next match">&#8595;</button>
         <button type="button" id="find-close" class="find-btn" aria-label="Close find">&#215;</button>
       </div>
+      <div id="goto" class="find" hidden>
+        <input type="text" id="goto-input" inputmode="numeric" placeholder="Go to line" autocomplete="off" spellcheck="false" />
+        <button type="button" id="goto-close" class="find-btn" aria-label="Close go to line">&#215;</button>
+      </div>
       <div id="doc" hidden>
         <div id="filename" class="filename"></div>
         <div id="frontmatter"></div>
@@ -50,6 +54,10 @@
             <input type="number" id="cfg-contentWidth" min="50" max="120" step="1" />
           </label>
         </div>
+        <label class="settings-row settings-row-checkbox">
+          <input type="checkbox" id="cfg-lineNumbers" />
+          <span>Line numbers</span>
+        </label>
         <div class="settings-footer">
           <span class="settings-note">applies live · saved to ~/.config/mdv/config.json</span>
           <button type="button" id="cfg-reset">Reset</button>

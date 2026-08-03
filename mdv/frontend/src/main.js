@@ -73,9 +73,10 @@ function restoreScrollAnchor(anchor) {
 async function renderPath(path, { preserveScroll } = { preserveScroll: false }) {
   const anchor = preserveScroll ? captureScrollAnchor() : null;
 
-  const fm = splitFrontmatter(await readableContent(path));
+  const raw = await readableContent(path);
+  const fm = splitFrontmatter(raw);
   els.frontmatter.innerHTML = renderFrontmatterHtml(fm);
-  els.content.innerHTML = renderMarkdownBody(fm.body);
+  els.content.innerHTML = renderMarkdownBody(fm.body, fm.lineOffset);
 
   await upgradeCodeBlocks(els.content);
   mermaidEntries = await upgradeMermaidBlocks(els.content);
@@ -278,7 +279,7 @@ function startPendingPoll() {
 // applies edits instantly and persists them through mdv.configWrite; the
 // 2s poll keeps external file edits working too.
 
-const CFG_DEFAULTS = { fontFamily: "", monoFamily: "", fontSize: 17, lineHeight: 1.65, contentWidth: 72 };
+const CFG_DEFAULTS = { fontFamily: "", monoFamily: "", fontSize: 17, lineHeight: 1.65, contentWidth: 72, lineNumbers: true };
 const CFG_VARS = ["--mdv-font-body", "--mdv-font-mono", "--mdv-font-size", "--mdv-line-height", "--mdv-content-width"];
 let cfgState = { ...CFG_DEFAULTS };
 let configMtime = 0;
@@ -291,6 +292,10 @@ function applyConfigVars(cfg) {
   if (Number.isFinite(cfg.fontSize)) root.setProperty("--mdv-font-size", `${cfg.fontSize}px`);
   if (Number.isFinite(cfg.lineHeight)) root.setProperty("--mdv-line-height", String(cfg.lineHeight));
   if (Number.isFinite(cfg.contentWidth)) root.setProperty("--mdv-content-width", `${cfg.contentWidth}ch`);
+  // The gutter is ::before content (styles.css gates it on this class), not
+  // a CSS var -- go-to-line keeps working either way since data-line is
+  // always stamped regardless of whether the mark is shown.
+  document.body.classList.toggle("no-line-numbers", !cfg.lineNumbers);
 }
 
 function cfgFromParsed(parsed) {
@@ -300,6 +305,7 @@ function cfgFromParsed(parsed) {
   if (Number.isFinite(parsed.fontSize)) cfg.fontSize = parsed.fontSize;
   if (Number.isFinite(parsed.lineHeight)) cfg.lineHeight = parsed.lineHeight;
   if (Number.isFinite(parsed.contentWidth)) cfg.contentWidth = parsed.contentWidth;
+  if (typeof parsed.lineNumbers === "boolean") cfg.lineNumbers = parsed.lineNumbers;
   return cfg;
 }
 
@@ -339,6 +345,7 @@ const cfgEls = {
   fontSize: document.getElementById("cfg-fontSize"),
   lineHeight: document.getElementById("cfg-lineHeight"),
   contentWidth: document.getElementById("cfg-contentWidth"),
+  lineNumbers: document.getElementById("cfg-lineNumbers"),
   reset: document.getElementById("cfg-reset"),
 };
 
@@ -416,6 +423,9 @@ function persistConfig() {
     out.fontSize = cfgState.fontSize;
     out.lineHeight = cfgState.lineHeight;
     out.contentWidth = cfgState.contentWidth;
+    // lineNumbers defaults to true, so only the off-state is worth writing --
+    // same "only write the non-default" pattern as fontFamily/monoFamily above.
+    if (cfgState.lineNumbers === false) out.lineNumbers = false;
     zero.invoke("mdv.configWrite", { raw: JSON.stringify(out, null, 2) + "\n" }).catch(() => {});
   }, 400);
 }
@@ -428,6 +438,7 @@ function populateSettings() {
   cfgEls.fontSize.value = cfgState.fontSize;
   cfgEls.lineHeight.value = cfgState.lineHeight;
   cfgEls.contentWidth.value = cfgState.contentWidth;
+  cfgEls.lineNumbers.checked = cfgState.lineNumbers;
 }
 
 function readSettingsInputs() {
@@ -439,11 +450,12 @@ function readSettingsInputs() {
   if (Number.isFinite(size)) cfgState.fontSize = size;
   if (Number.isFinite(lh)) cfgState.lineHeight = lh;
   if (Number.isFinite(width)) cfgState.contentWidth = width;
+  cfgState.lineNumbers = cfgEls.lineNumbers.checked;
   applyConfigVars(cfgState);
   persistConfig();
 }
 
-for (const key of ["fontFamily", "monoFamily", "fontSize", "lineHeight", "contentWidth"]) {
+for (const key of ["fontFamily", "monoFamily", "fontSize", "lineHeight", "contentWidth", "lineNumbers"]) {
   cfgEls[key].addEventListener("input", readSettingsInputs);
   cfgEls[key].addEventListener("change", readSettingsInputs);
 }
@@ -459,6 +471,7 @@ cfgEls.reset.addEventListener("click", () => {
 function openSettings() {
   closeToc();
   closeFind(); // shares the top-right slot, and .find outranks it on z-index
+  closeGoto();
   populateSettings();
   cfgEls.panel.hidden = false;
   requestAnimationFrame(() => cfgEls.panel.classList.add("open"));
@@ -785,7 +798,9 @@ function runSearch(query) {
 
 // Un-hides whichever collapsed section(s) currently hide `mark`, walking
 // outward from its top-level container in els.content. Bounded so a DOM
-// surprise (e.g. a cycle) can't hang the app.
+// surprise (e.g. a cycle) can't hang the app. `mark` can be any descendant
+// of els.content, not just a <mark> find hit -- go-to-line reuses this for
+// arbitrary target elements.
 function revealMatch(mark) {
   if (!els.content.contains(mark)) return;
   let top = mark;
@@ -830,6 +845,7 @@ function findPrev() {
 function openFind() {
   closeToc();
   closeSettings();
+  closeGoto();
   findEls.bar.hidden = false;
   findEls.input.focus();
   findEls.input.select();
@@ -884,6 +900,141 @@ if (typeof zero.on === "function") {
   });
 }
 
+// ---- go to line (Cmd+L) ----
+//
+// Same WKWebView Cmd-modifier limitation as find: the menu route
+// (mdv.goto -> mdv:goto window event) is the only way Cmd+L reaches here
+// in the packaged app; the keydown fallback below covers browser dev mode.
+
+const gotoEls = {
+  bar: document.getElementById("goto"),
+  input: document.getElementById("goto-input"),
+  close: document.getElementById("goto-close"),
+};
+
+// Number of ancestor steps from el up to (but not including) els.content --
+// used to pick the most specific match when several data-line ranges
+// contain the requested line (e.g. a list item nested inside its list).
+function elementDepth(el) {
+  let depth = 0;
+  let cur = el;
+  while (cur && cur !== els.content) {
+    depth += 1;
+    cur = cur.parentElement;
+  }
+  return depth;
+}
+
+// Finds the element to jump to for 1-based source line n: the deepest
+// [data-line, data-line-end] range that contains it, or -- if n falls in a
+// gap no range covers -- the nearest preceding block. Returns null when n
+// is before the first block (caller scrolls to top).
+function findTargetForLine(n) {
+  const nodes = Array.from(els.content.querySelectorAll("[data-line]"));
+  if (nodes.length === 0) return null;
+  const withMeta = nodes.map((el) => {
+    const line = parseInt(el.dataset.line, 10);
+    const lineEndRaw = el.dataset.lineEnd;
+    const lineEnd = lineEndRaw != null ? parseInt(lineEndRaw, 10) : line;
+    return { el, line, lineEnd, depth: elementDepth(el) };
+  });
+  const containing = withMeta.filter((m) => m.line <= n && n <= m.lineEnd);
+  if (containing.length > 0) {
+    containing.sort((a, b) => b.depth - a.depth || a.lineEnd - a.line - (b.lineEnd - b.line));
+    return containing[0];
+  }
+  let best = null;
+  for (const m of withMeta) {
+    if (m.line <= n && (!best || m.line > best.line)) best = m;
+  }
+  return best;
+}
+
+function flashElement(el) {
+  el.classList.remove("line-flash");
+  void el.offsetWidth; // force reflow so re-adding the class restarts the animation
+  el.classList.add("line-flash");
+  setTimeout(() => el.classList.remove("line-flash"), 1600);
+}
+
+function jumpToLine(n) {
+  const target = findTargetForLine(n);
+  if (!target) {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
+  revealMatch(target.el);
+
+  if (target.el.classList.contains("code-block") && n > target.line) {
+    const innerIndex = n - target.line - 1; // opening ``` fence occupies target.line
+    const lineSpans = target.el.querySelectorAll("code > span.line");
+    if (lineSpans.length > 0 && innerIndex >= 0 && innerIndex < lineSpans.length) {
+      const span = lineSpans[innerIndex];
+      span.scrollIntoView({ behavior: "smooth", block: "center" });
+      flashElement(span);
+      return;
+    }
+    // Not shiki-highlighted yet (or an unsupported language, so it never
+    // will be) -- no per-line spans to target, so land proportionally
+    // within the block instead. Flash the inner <pre>, not the wrapper --
+    // the wrapper is unpadded and same-sized as the <pre>, whose own
+    // opaque background would paint straight over a flash on the wrapper.
+    const codeEl = target.el.querySelector("pre") || target.el;
+    const totalLines = Math.max(1, target.lineEnd - target.line);
+    const frac = Math.min(1, Math.max(0, innerIndex / totalLines));
+    codeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    requestAnimationFrame(() => {
+      const rect = codeEl.getBoundingClientRect();
+      const y = window.scrollY + rect.top + rect.height * frac - window.innerHeight / 2;
+      window.scrollTo({ top: y, behavior: "smooth" });
+    });
+    flashElement(codeEl);
+    return;
+  }
+
+  target.el.scrollIntoView({ behavior: "smooth", block: "center" });
+  flashElement(target.el);
+}
+
+function openGoto() {
+  closeToc();
+  closeSettings();
+  closeFind();
+  gotoEls.bar.hidden = false;
+  gotoEls.input.focus();
+  gotoEls.input.select();
+}
+
+function closeGoto() {
+  gotoEls.bar.hidden = true;
+  gotoEls.input.value = "";
+}
+
+function toggleGoto() {
+  if (gotoEls.bar.hidden) openGoto();
+  else closeGoto();
+}
+
+gotoEls.input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const n = parseInt(gotoEls.input.value, 10);
+    if (Number.isFinite(n) && n > 0) {
+      jumpToLine(n);
+      closeGoto();
+    }
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeGoto();
+  }
+});
+
+gotoEls.close.addEventListener("click", () => closeGoto());
+
+if (typeof zero.on === "function") {
+  zero.on("mdv:goto", () => toggleGoto());
+}
+
 // ---- open dialog ----
 
 async function openViaDialog() {
@@ -905,6 +1056,7 @@ document.addEventListener("keydown", (e) => {
     closeToc();
     closeSettings();
     closeFind();
+    closeGoto();
     return;
   }
   const mod = e.metaKey || e.ctrlKey;
@@ -919,6 +1071,10 @@ document.addEventListener("keydown", (e) => {
     // mode and stops the browser's own find bar hijacking a document viewer.
     e.preventDefault();
     toggleFind();
+  } else if (key === "l") {
+    // Same dead-in-packaged-app / browser-dev-mode-only story as Cmd+F above.
+    e.preventDefault();
+    toggleGoto();
   } else if (key === "g" && e.shiftKey) {
     e.preventDefault();
     findPrev();

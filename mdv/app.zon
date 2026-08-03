@@ -25,6 +25,7 @@
         .{ .id = "mdv.find", .title = "Find" },
         .{ .id = "mdv.findNext", .title = "Find Next" },
         .{ .id = "mdv.findPrev", .title = "Find Previous" },
+        .{ .id = "mdv.goto", .title = "Go to Line" },
     },
     .menus = .{
         .{
@@ -40,6 +41,7 @@
                 .{ .label = "Find...", .command = "mdv.find", .key = "f", .modifiers = .{"command"} },
                 .{ .label = "Find Next", .command = "mdv.findNext", .key = "g", .modifiers = .{"command"} },
                 .{ .label = "Find Previous", .command = "mdv.findPrev", .key = "g", .modifiers = .{ "command", "shift" } },
+                .{ .label = "Go to Line...", .command = "mdv.goto", .key = "l", .modifiers = .{"command"} },
             },
         },
     },
